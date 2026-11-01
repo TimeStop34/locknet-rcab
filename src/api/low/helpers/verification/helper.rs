@@ -1,7 +1,5 @@
 use std::sync::Arc;
-
 use tokio::sync::{broadcast, mpsc};
-
 use crate::api::low::command::Cmd;
 use crate::api::low::event::Event;
 use crate::api::low::helpers::olm::LockNetOlmHelper;
@@ -17,42 +15,10 @@ pub struct LockNetVerificationHelper {
 }
 
 impl LockNetVerificationHelper {
-    pub async fn sas_start(
-        &self,
-        to_user: i64,
-        to_session: i64,
-        our_msk_b64: String,
-        our_ed25519_b64: String,
-    ) -> Result<SasFlow> {
-        SasFlow::start(
-            self.olm.clone(),
-            self.event_tx.subscribe(),
-            self.store.clone(),
-            to_user,
-            to_session,
-            our_msk_b64,
-            our_ed25519_b64,
-        )
-        .await
+    pub async fn sas_start(&self, to_user: i64, to_session: i64, our_msk_b64: String, our_ed25519_b64: String) -> Result<SasFlow> {
+        SasFlow::start(self.olm.clone(), self.event_tx.subscribe(), self.store.clone(), to_user, to_session, our_msk_b64, our_ed25519_b64).await
     }
-
-    pub async fn sas_start_responder(
-        &self,
-        to_user: i64,
-        to_session: i64,
-        txid: String,
-        our_msk_b64: String,
-        our_ed25519_b64: String,
-    ) -> Result<SasFlow> {
-        SasFlow::start_as_responder(
-            self.olm.clone(),
-            self.event_tx.subscribe(),
-            txid,
-            to_user,
-            to_session,
-            our_msk_b64,
-            our_ed25519_b64,
-        )
-        .await
+    pub async fn sas_start_responder(&self, to_user: i64, to_session: i64, txid: String, our_msk_b64: String, our_ed25519_b64: String) -> Result<SasFlow> {
+        SasFlow::start_as_responder(self.olm.clone(), self.event_tx.subscribe(), txid, to_user, to_session, our_msk_b64, our_ed25519_b64).await
     }
 }

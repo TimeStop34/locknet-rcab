@@ -27,17 +27,7 @@ pub(crate) fn spawn(
     auth_ok_tx: Option<oneshot::Sender<Result<i64>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(
-            config,
-            http,
-            cmd_rx,
-            event_tx.clone(),
-            session,
-            initial_ajwt,
-            auth_ok_tx,
-        )
-        .await
-        {
+        if let Err(e) = run(config, http, cmd_rx, event_tx.clone(), session, initial_ajwt, auth_ok_tx).await {
             tracing::warn!(?e, "runner stopped");
             let _ = event_tx.send(Event::SessionExpired);
         }
@@ -60,17 +50,7 @@ async fn run(
     let mut first_attempt = true;
 
     loop {
-        let result = run_once(
-            &config,
-            &mut cmd_rx,
-            &event_tx,
-            &pending,
-            &mut req_counter,
-            &mut auth_ok_tx,
-            &mut ajwt,
-        )
-        .await;
-
+        let result = run_once(&config, &mut cmd_rx, &event_tx, &pending, &mut req_counter, &mut auth_ok_tx, &mut ajwt).await;
         drain_pending(&pending).await;
 
         match result {
@@ -101,7 +81,6 @@ async fn run(
                 tracing::warn!(?e, "refresh failed, will retry");
             }
         }
-
         first_attempt = false;
     }
 }
@@ -130,14 +109,11 @@ async fn run_ws(
     ajwt: &mut String,
 ) -> Result<()> {
     let auth_msg = json!({ "type": "auth", "id": "auth-1", "data": { "token": ajwt } });
-    ws.send(WsMessage::Text(auth_msg.to_string().into()))
-        .await
-        .map_err(LockNetError::Ws)?;
+    ws.send(WsMessage::Text(auth_msg.to_string().into())).await.map_err(LockNetError::Ws)?;
 
     let mut ping = tokio::time::interval(config.ws_ping_interval);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     ping.tick().await;
-
     let mut authenticated = false;
 
     loop {
@@ -148,18 +124,13 @@ async fn run_ws(
                     Some(Err(e)) => return Err(LockNetError::Ws(e)),
                     None => return Err(LockNetError::RunnerDown),
                 };
-
                 let text = match msg {
                     WsMessage::Text(t) => t,
-                    WsMessage::Ping(p) => {
-                        let _ = ws.send(WsMessage::Pong(p)).await;
-                        continue;
-                    }
+                    WsMessage::Ping(p) => { let _ = ws.send(WsMessage::Pong(p)).await; continue; }
                     WsMessage::Pong(_) => continue,
                     WsMessage::Close(_) => return Err(LockNetError::RunnerDown),
                     _ => continue,
                 };
-
                 let val: Value = match serde_json::from_str(text.as_str()) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -169,10 +140,7 @@ async fn run_ws(
                 if msg_type == "auth_ok" {
                     authenticated = true;
                     if let Some(tx) = auth_ok_tx.take() {
-                        let session_id = val
-                            .pointer("/data/session_id")
-                            .and_then(|v| v.as_i64())
-                            .unwrap_or(0);
+                        let session_id = val.pointer("/data/session_id").and_then(|v| v.as_i64()).unwrap_or(0);
                         let _ = tx.send(Ok(session_id));
                     }
                     continue;
@@ -182,36 +150,17 @@ async fn run_ws(
                     let id = val.get("id").and_then(|v| v.as_str()).map(String::from);
                     if let Some(id) = id {
                         if let Some(reply) = pending.lock().await.remove(&id) {
-                            let code = val
-                                .pointer("/data/id")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown")
-                                .to_string();
-                            let message = val
-                                .pointer("/data/error")
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("")
-                                .to_string();
+                            let code = val.pointer("/data/id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                            let message = val.pointer("/data/error").and_then(|v| v.as_str()).unwrap_or("").to_string();
                             reply.resolve_err(LockNetError::Server { code, message });
                             continue;
                         }
                     }
                     if !authenticated {
-                        let code = val
-                            .pointer("/data/id")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown")
-                            .to_string();
-                        let message = val
-                            .pointer("/data/error")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("auth failed")
-                            .to_string();
+                        let code = val.pointer("/data/id").and_then(|v| v.as_str()).unwrap_or("unknown").to_string();
+                        let message = val.pointer("/data/error").and_then(|v| v.as_str()).unwrap_or("auth failed").to_string();
                         if let Some(tx) = auth_ok_tx.take() {
-                            let _ = tx.send(Err(LockNetError::Server {
-                                code: code.clone(),
-                                message: message.clone(),
-                            }));
+                            let _ = tx.send(Err(LockNetError::Server { code: code.clone(), message: message.clone() }));
                         }
                         return Err(LockNetError::Unauthorized(format!("{code}: {message}")));
                     }
@@ -226,10 +175,8 @@ async fn run_ws(
                         continue;
                     }
                 }
-
                 let _ = event_tx.send(Event::parse(val));
             }
-
             cmd = cmd_rx.recv(), if authenticated => {
                 match cmd {
                     Some(Cmd::Shutdown { reply }) => {
@@ -254,7 +201,6 @@ async fn run_ws(
                     }
                 }
             }
-
             _ = ping.tick() => {
                 if let Err(e) = ws.send(WsMessage::Ping(Vec::new().into())).await {
                     return Err(LockNetError::Ws(e));
@@ -271,20 +217,12 @@ async fn drain_pending(pending: &Pending) {
     }
 }
 
-async fn refresh_ajwt(
-    config: &LockNetConfig,
-    http: &reqwest::Client,
-    session: &Session,
-) -> Result<String> {
+async fn refresh_ajwt(config: &LockNetConfig, http: &reqwest::Client, session: &Session) -> Result<String> {
     let rjwt = {
         let s = session.lock().await;
-        s.as_ref()
-            .map(|c| c.rjwt.clone())
-            .ok_or(LockNetError::NotConnected)?
+        s.as_ref().map(|c| c.rjwt.clone()).ok_or(LockNetError::NotConnected)?
     };
-
     let resp = http::refresh(config, http, &rjwt).await?;
-
     {
         let mut s = session.lock().await;
         if let Some(ctx) = s.as_mut() {
@@ -293,6 +231,5 @@ async fn refresh_ajwt(
             ctx.rtime = chrono::Utc::now();
         }
     }
-
     Ok(resp.access_token)
 }

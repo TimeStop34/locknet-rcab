@@ -28,7 +28,7 @@ impl<T: Send + 'static> SimpleFlow<T> {
     where
         F: Future<Output = Result<T>> + Send + 'static,
     {
-        let result: Arc<Mutex<Option<Result<T>>>> = Arc::new(Mutex::new(None));
+        let result = Arc::new(Mutex::new(None));
         let status = Arc::new(AtomicU8::new(STATUS_PENDING));
         let (tx, rx) = oneshot::channel();
 
@@ -42,11 +42,7 @@ impl<T: Send + 'static> SimpleFlow<T> {
             let _ = tx.send(());
         });
 
-        Self {
-            result,
-            status,
-            rx,
-        }
+        Self { result, status, rx }
     }
 
     pub fn check_status(&self) -> FlowStatus {

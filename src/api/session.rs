@@ -14,16 +14,7 @@ pub struct LockNetSessionContext {
 
 #[derive(Debug, Clone)]
 pub enum Credentials {
-    Login {
-        username: String,
-        password: String,
-    },
-    Register {
-        username: String,
-        password: String,
-        display_name: Option<String>,
-    },
-    Session {
-        refresh_jwt: String,
-    },
+    Login { username: String, password: String },
+    Register { username: String, password: String, display_name: Option<String> },
+    Session { refresh_jwt: String },
 }

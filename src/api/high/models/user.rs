@@ -21,18 +21,7 @@ pub struct User {
 
 impl User {
     pub fn unknown(id: i64) -> Self {
-        Self {
-            id,
-            username: "unknown".into(),
-            display_name: None,
-            avatar_url: None,
-            is_bot: false,
-            verified: false,
-            sessions: Vec::new(),
-        }
+        Self { id, username: "unknown".into(), display_name: None, avatar_url: None, is_bot: false, verified: false, sessions: Vec::new() }
     }
-
-    pub fn display(&self) -> &str {
-        self.display_name.as_deref().unwrap_or(&self.username)
-    }
+    pub fn display(&self) -> &str { self.display_name.as_deref().unwrap_or(&self.username) }
 }

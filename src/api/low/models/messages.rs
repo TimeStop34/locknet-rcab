@@ -1,20 +1,12 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
 use super::common::Encrypted;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SendMessageAck {
-    pub message_id: i64,
-    pub created_at: DateTime<Utc>,
-}
+pub struct SendMessageAck { pub message_id: i64, pub created_at: DateTime<Utc> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Reaction {
-    pub emoji: String,
-    pub count: usize,
-    pub user_ids: Vec<i64>,
-}
+pub struct Reaction { pub emoji: String, pub count: usize, pub user_ids: Vec<i64> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Message {
@@ -31,10 +23,7 @@ pub struct Message {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessagesPage {
-    pub messages: Vec<Message>,
-    pub has_more: bool,
-}
+pub struct MessagesPage { pub messages: Vec<Message>, pub has_more: bool }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MessageCreate {
@@ -50,32 +39,13 @@ pub struct MessageCreate {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageUpdate {
-    pub message_id: i64,
-    pub chat_id: i64,
-    pub encrypted: Encrypted,
-    pub edited_at: DateTime<Utc>,
-}
+pub struct MessageUpdate { pub message_id: i64, pub chat_id: i64, pub encrypted: Encrypted, pub edited_at: DateTime<Utc> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MessageDelete {
-    pub message_id: i64,
-    pub chat_id: i64,
-}
+pub struct MessageDelete { pub message_id: i64, pub chat_id: i64 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReactionAdd {
-    pub message_id: i64,
-    pub chat_id: i64,
-    pub user_id: i64,
-    pub emoji: String,
-    pub created_at: DateTime<Utc>,
-}
+pub struct ReactionAdd { pub message_id: i64, pub chat_id: i64, pub user_id: i64, pub emoji: String, pub created_at: DateTime<Utc> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReactionRemove {
-    pub message_id: i64,
-    pub chat_id: i64,
-    pub user_id: i64,
-    pub emoji: String,
-}
+pub struct ReactionRemove { pub message_id: i64, pub chat_id: i64, pub user_id: i64, pub emoji: String }

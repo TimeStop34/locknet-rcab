@@ -1,14 +1,9 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-
 use super::user::User;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct GroupMember {
-    pub user: User,
-    pub is_mod: bool,
-    pub joined_at: DateTime<Utc>,
-}
+pub struct GroupMember { pub user: User, pub is_mod: bool, pub joined_at: DateTime<Utc> }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
@@ -24,7 +19,5 @@ pub struct Group {
 }
 
 impl Group {
-    pub fn is_direct(&self) -> bool {
-        !self.is_public && self.public_id.is_none() && self.member_count == 2
-    }
+    pub fn is_direct(&self) -> bool { !self.is_public && self.public_id.is_none() && self.member_count == 2 }
 }

@@ -58,57 +58,28 @@ impl LockNetClient {
         }
     }
 
-    pub fn config(&self) -> &LockNetConfig {
-        &self.config
-    }
-
+    pub fn config(&self) -> &LockNetConfig { &self.config }
     pub fn session(&self) -> Option<LockNetSessionContext> {
         self.session.try_lock().ok().and_then(|g| g.clone())
     }
+    pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> { self.low_agent.clone() }
+    pub fn get_agent(&self) -> Option<Arc<LockNetAgent>> { self.high_agent.clone() }
+    pub fn store(&self) -> Arc<dyn CryptoStore> { self.store.clone() }
 
-    pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> {
-        self.low_agent.clone()
-    }
-
-    pub fn get_agent(&self) -> Option<Arc<LockNetAgent>> {
-        self.high_agent.clone()
-    }
-
-    pub fn store(&self) -> Arc<dyn CryptoStore> {
-        self.store.clone()
-    }
-
-    pub async fn connection_request(
-        &mut self,
-        creds: Credentials,
-    ) -> Result<LockNetSessionContext> {
+    pub async fn connection_request(&mut self, creds: Credentials) -> Result<LockNetSessionContext> {
         if self.runner.is_some() {
             self.disconnect().await?;
         }
 
-        let is_fresh = matches!(
-            creds,
-            Credentials::Login { .. } | Credentials::Register { .. }
-        );
+        let is_fresh = matches!(creds, Credentials::Login { .. } | Credentials::Register { .. });
 
         let (user_id, ajwt, rjwt) = match creds {
             Credentials::Login { username, password } => {
                 let r = http::login(&self.config, &self.http, &username, &password).await?;
                 (r.user_id, r.access_token, r.refresh_token)
             }
-            Credentials::Register {
-                username,
-                password,
-                display_name,
-            } => {
-                let r = http::register(
-                    &self.config,
-                    &self.http,
-                    &username,
-                    &password,
-                    display_name.as_deref(),
-                )
-                .await?;
+            Credentials::Register { username, password, display_name } => {
+                let r = http::register(&self.config, &self.http, &username, &password, display_name.as_deref()).await?;
                 (r.user_id, r.access_token, r.refresh_token)
             }
             Credentials::Session { refresh_jwt } => {
@@ -136,9 +107,7 @@ impl LockNetClient {
             Ok(Ok(_)) => {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
                 let _ = cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
-                return Err(LockNetError::InvalidResponse(
-                    "server did not return session_id in auth_ok".into(),
-                ));
+                return Err(LockNetError::InvalidResponse("server did not return session_id in auth_ok".into()));
             }
             Ok(Err(e)) => {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -209,14 +178,10 @@ impl LockNetClient {
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(high) = self.high_agent.as_ref() {
-            let high = Arc::clone(high);
-            let mut guard = high;
-            if let Some(h) = Arc::get_mut(&mut guard) {
-                h.shutdown().await;
-            }
+        if let Some(high) = self.high_agent.take() {
+            let mut high = Arc::try_unwrap(high).ok().unwrap_or_else(|| panic!("Arc<LockNetAgent> held externally"));
+            high.shutdown().await;
         }
-        self.high_agent = None;
         self.low_agent = None;
         if let Some(handle) = self.runner.take() {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -230,16 +195,11 @@ impl LockNetClient {
 }
 
 fn extract_sub(jwt: &str) -> Result<i64> {
-    let payload = jwt
-        .split('.')
-        .nth(1)
+    let payload = jwt.split('.').nth(1)
         .ok_or_else(|| LockNetError::InvalidResponse("jwt: no payload".into()))?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
-        .decode(payload)
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload)
         .map_err(|_| LockNetError::InvalidResponse("jwt: bad b64".into()))?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    v.get("sub")
-        .and_then(|s| s.as_str())
-        .and_then(|s| s.parse::<i64>().ok())
+    v.get("sub").and_then(|s| s.as_str()).and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| LockNetError::InvalidResponse("jwt: no sub".into()))
 }

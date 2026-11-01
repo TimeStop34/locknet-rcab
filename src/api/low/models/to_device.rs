@@ -1,11 +1,9 @@
 use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToDeviceCiphertext {
-    #[serde(rename = "type")]
-    pub ciphertext_type: u8,
+    #[serde(rename = "type")] pub ciphertext_type: u8,
     pub body: String,
 }
 
@@ -20,7 +18,4 @@ pub struct ToDevicePayload {
 pub type ToDeviceMessages = HashMap<i64, HashMap<i64, serde_json::Value>>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ToDeviceAck {
-    pub accepted: usize,
-    pub dropped: usize,
-}
+pub struct ToDeviceAck { pub accepted: usize, pub dropped: usize }
