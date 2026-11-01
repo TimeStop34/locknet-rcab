@@ -1,32 +1,323 @@
 use std::collections::HashMap;
-use serde_json::json;
-use tokio::sync::mpsc;
-use crate::api::low::command::{dispatch, dispatch_unit, Cmd};
-use crate::api::low::models::*;
-use crate::core::errors::Result;
+use std::sync::Arc;
 
-pub struct LockNetBackupHelper { pub(crate) cmd_tx: mpsc::Sender<Cmd> }
+use base64::Engine;
+use hkdf::Hkdf;
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tokio::sync::mpsc;
+use crypto_secretbox::aead::{generic_array::GenericArray, Aead};
+use crypto_secretbox::{KeyInit, XSalsa20Poly1305};
+
+use crate::api::low::command::{dispatch, dispatch_unit, Cmd};
+use crate::api::low::helpers::megolm::LockNetMegolmHelper;
+use crate::api::low::models::*;
+use crate::core::crypto::CryptoStore;
+use crate::core::errors::{LockNetError, Result};
+
+const BACKUP_ALGORITHM: &str = "ln.encryption.backup.v1";
+const BACKUP_HKDF_INFO: &[u8] = b"LOCKNET_ENCRYPTION_BACKUP_V1";
+
+// ---- RecoveryKey ----
+
+#[derive(Clone)]
+pub struct RecoveryKey([u8; 32]);
+
+impl std::fmt::Debug for RecoveryKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Секрет намеренно не печатаем
+        write!(f, "RecoveryKey(<redacted 32 bytes>)")
+    }
+}
+
+impl RecoveryKey {
+    pub fn generate() -> Self {
+        let mut bytes = [0u8; 32];
+        getrandom::getrandom(&mut bytes).expect("getrandom");
+        Self(bytes)
+    }
+
+    pub fn from_bytes(bytes: [u8; 32]) -> Self {
+        Self(bytes)
+    }
+
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    pub fn to_base64(&self) -> String {
+        b64_no_pad(&self.0)
+    }
+
+    pub fn from_base64(s: &str) -> Result<Self> {
+        let bytes = decode_b64(s).map_err(|_| {
+            LockNetError::InvalidArgument("recovery key: invalid base64".into())
+        })?;
+        if bytes.len() != 32 {
+            return Err(LockNetError::InvalidArgument(format!(
+                "recovery key must be 32 bytes, got {}",
+                bytes.len()
+            )));
+        }
+        let mut arr = [0u8; 32];
+        arr.copy_from_slice(&bytes);
+        Ok(Self(arr))
+    }
+}
+
+// ---- Results ----
+
+#[derive(Debug, Clone)]
+pub struct BackupExportResult {
+    pub version: i32,
+    pub items_uploaded: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct BackupImportResult {
+    pub version: i32,
+    pub sessions_imported: u32,
+}
+
+// ---- Helper ----
+
+pub struct LockNetBackupHelper {
+    pub(crate) cmd_tx: mpsc::Sender<Cmd>,
+    pub(crate) store: Arc<dyn CryptoStore>,
+    pub(crate) megolm: Arc<LockNetMegolmHelper>,
+}
 
 impl LockNetBackupHelper {
+    // ---- wire methods ----
+
     pub async fn versions(&self) -> Result<Vec<BackupVersion>> {
-        #[derive(serde::Deserialize)] struct W { versions: Vec<BackupVersion> }
+        #[derive(serde::Deserialize)]
+        struct W {
+            versions: Vec<BackupVersion>,
+        }
         let w: W = dispatch(&self.cmd_tx, json!({ "type": "backup_versions", "data": {} })).await?;
         Ok(w.versions)
     }
-    pub async fn new_version(&self, algorithm: impl Into<String>, auth_data: serde_json::Value) -> Result<i32> {
-        #[derive(serde::Deserialize)] struct W { version: i32 }
-        let w: W = dispatch(&self.cmd_tx, json!({ "type": "backup_new", "data": { "algorithm": algorithm.into(), "auth_data": auth_data } })).await?;
+
+    pub async fn new_version(
+        &self,
+        algorithm: impl Into<String>,
+        auth_data: serde_json::Value,
+    ) -> Result<i32> {
+        #[derive(serde::Deserialize)]
+        struct W {
+            version: i32,
+        }
+        let w: W = dispatch(
+            &self.cmd_tx,
+            json!({ "type": "backup_new", "data": { "algorithm": algorithm.into(), "auth_data": auth_data } }),
+        )
+        .await?;
         Ok(w.version)
     }
-    pub async fn put(&self, version: i32, items: HashMap<String, serde_json::Value>) -> Result<u32> {
-        #[derive(serde::Deserialize)] struct W { count: u32 }
-        let w: W = dispatch(&self.cmd_tx, json!({ "type": "backup_put", "data": { "version": version, "items": items } })).await?;
+
+    pub async fn put(
+        &self,
+        version: i32,
+        items: HashMap<String, serde_json::Value>,
+    ) -> Result<u32> {
+        #[derive(serde::Deserialize)]
+        struct W {
+            count: u32,
+        }
+        let w: W = dispatch(
+            &self.cmd_tx,
+            json!({ "type": "backup_put", "data": { "version": version, "items": items } }),
+        )
+        .await?;
         Ok(w.count)
     }
+
     pub async fn get(&self, version: i32) -> Result<BackupVersionData> {
         dispatch(&self.cmd_tx, json!({ "type": "backup_get", "data": { "version": version } })).await
     }
+
     pub async fn delete(&self, version: i32) -> Result<()> {
         dispatch_unit(&self.cmd_tx, json!({ "type": "backup_delete", "data": { "version": version } })).await
     }
+
+    // ---- real backup flows ----
+
+    /// Экспортирует все известные megolm_inbound сессии в новую backup-версию.
+    /// Шифрует XSalsa20-Poly1305 (SecretBox-совместимо) с ключом,
+    /// производным от `recovery_key` через HKDF-SHA256.
+    pub async fn export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
+        let secret = derive_backup_secret(recovery_key)?;
+        let public_key = b64_no_pad(&sha256_bytes(&secret));
+
+        let auth_data = json!({
+            "algorithm": BACKUP_ALGORITHM,
+            "public_key": public_key,
+        });
+
+        let version = self.new_version(BACKUP_ALGORITHM, auth_data).await?;
+
+        let mut items: HashMap<String, Value> = HashMap::new();
+        for (chat_id, megolm_session_id) in self.store.megolm_inbound_all() {
+            let session = match self.store.megolm_inbound(chat_id, &megolm_session_id) {
+                Some(s) => s,
+                None => continue,
+            };
+
+            let (session_key_b64, first_known_index) = {
+                let mut s = session.lock().await;
+                let first = s.first_known_index();
+                match s.export_at(first) {
+                    Some(key) => (key.to_base64(), first),
+                    None => continue,
+                }
+            };
+
+            let plaintext = json!({
+                "session_key": session_key_b64,
+                "first_known_index": first_known_index,
+            })
+            .to_string();
+
+            let encrypted = encrypt_item(&secret, plaintext.as_bytes())?;
+            let item_id = format!("{}:{}", chat_id, megolm_session_id);
+            items.insert(item_id, encrypted);
+        }
+
+        let uploaded = self.put(version, items).await?;
+        Ok(BackupExportResult { version, items_uploaded: uploaded })
+    }
+
+    /// Импортирует все megolm_inbound из backup-версии.
+    /// Проверяет, что `recovery_key` действительно матчит `auth_data.public_key`.
+    pub async fn import(
+        &self,
+        version: i32,
+        recovery_key: &RecoveryKey,
+    ) -> Result<BackupImportResult> {
+        let secret = derive_backup_secret(recovery_key)?;
+        let data = self.get(version).await?;
+
+        let expected_pk = b64_no_pad(&sha256_bytes(&secret));
+        let claimed_pk = data
+            .auth_data
+            .get("public_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| {
+                LockNetError::InvalidResponse("backup auth_data.public_key missing".into())
+            })?;
+        if normalize_b64(claimed_pk) != expected_pk {
+            return Err(LockNetError::InvalidArgument(
+                "recovery key does not match backup auth_data".into(),
+            ));
+        }
+
+        let mut imported = 0u32;
+        for (item_id, enc) in &data.items {
+            let (chat_id_str, megolm_session_id) = item_id.split_once(':').ok_or_else(|| {
+                LockNetError::InvalidResponse(format!("bad item_id: {item_id}"))
+            })?;
+            let chat_id: i64 = chat_id_str.parse().map_err(|_| {
+                LockNetError::InvalidResponse(format!("bad chat_id in item_id: {chat_id_str}"))
+            })?;
+
+            let plaintext = decrypt_item(&secret, enc)?;
+            let parsed: Value = serde_json::from_slice(&plaintext)?;
+            let session_key = parsed
+                .get("session_key")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| {
+                    LockNetError::InvalidResponse("backup item missing session_key".into())
+                })?;
+
+            self.megolm
+                .import(
+                    chat_id,
+                    megolm_session_id.to_string(),
+                    session_key.to_string(),
+                )
+                .await?;
+            imported += 1;
+        }
+
+        Ok(BackupImportResult { version, sessions_imported: imported })
+    }
+}
+
+// ---- crypto helpers ----
+
+fn derive_backup_secret(rk: &RecoveryKey) -> Result<[u8; 32]> {
+    let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), rk.as_bytes());
+    let mut okm = [0u8; 32];
+    hk.expand(BACKUP_HKDF_INFO, &mut okm)
+        .map_err(|e| LockNetError::InvalidResponse(format!("hkdf backup_secret: {e}")))?;
+    Ok(okm)
+}
+
+fn sha256_bytes(data: &[u8]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    let digest = hasher.finalize();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+fn encrypt_item(secret: &[u8; 32], plaintext: &[u8]) -> Result<Value> {
+    let cipher = XSalsa20Poly1305::new(GenericArray::from_slice(secret));
+    let mut nonce_bytes = [0u8; 24];
+    getrandom::getrandom(&mut nonce_bytes).expect("getrandom");
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+
+    let ciphertext = cipher
+        .encrypt(nonce, plaintext)
+        .map_err(|e| LockNetError::InvalidResponse(format!("secretbox encrypt: {e:?}")))?;
+
+    Ok(json!({
+        "nonce": b64_no_pad(&nonce_bytes),
+        "ciphertext": b64_no_pad(&ciphertext),
+    }))
+}
+
+fn decrypt_item(secret: &[u8; 32], enc: &Value) -> Result<Vec<u8>> {
+    let nonce_b64 = enc
+        .get("nonce")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LockNetError::InvalidResponse("item nonce missing".into()))?;
+    let ct_b64 = enc
+        .get("ciphertext")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| LockNetError::InvalidResponse("item ciphertext missing".into()))?;
+
+    let nonce_bytes = decode_b64(nonce_b64)?;
+    if nonce_bytes.len() != 24 {
+        return Err(LockNetError::InvalidResponse(format!(
+            "item nonce must be 24 bytes, got {}",
+            nonce_bytes.len()
+        )));
+    }
+    let ciphertext = decode_b64(ct_b64)?;
+
+    let cipher = XSalsa20Poly1305::new(GenericArray::from_slice(secret));
+    let nonce = GenericArray::from_slice(&nonce_bytes);
+
+    cipher
+        .decrypt(nonce, ciphertext.as_ref())
+        .map_err(|_| LockNetError::InvalidArgument("backup item decrypt failed".into()))
+}
+
+fn b64_no_pad(bytes: &[u8]) -> String {
+    base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
+}
+
+fn decode_b64(s: &str) -> Result<Vec<u8>> {
+    base64::engine::general_purpose::STANDARD_NO_PAD
+        .decode(s)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(s))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s))
+        .map_err(|e| LockNetError::InvalidResponse(format!("b64: {e}")))
+}
+
+fn normalize_b64(s: &str) -> String {
+    s.trim_end_matches('=').to_string()
 }

@@ -6,7 +6,6 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 
-use crate::api::high::agent::LockNetAgent;
 use crate::api::low::agent::LockNetLowAgent;
 use crate::api::low::command::{dispatch, Cmd};
 use crate::api::low::event::Event;
@@ -26,7 +25,6 @@ pub struct LockNetClient {
     http: reqwest::Client,
     session: Arc<Mutex<Option<LockNetSessionContext>>>,
     low_agent: Option<Arc<LockNetLowAgent>>,
-    high_agent: Option<Arc<LockNetAgent>>,
     runner: Option<RunnerHandle>,
     event_tx: broadcast::Sender<Event>,
     store: Arc<dyn CryptoStore>,
@@ -51,7 +49,6 @@ impl LockNetClient {
             http,
             session: Arc::new(Mutex::new(None)),
             low_agent: None,
-            high_agent: None,
             runner: None,
             event_tx,
             store,
@@ -63,7 +60,6 @@ impl LockNetClient {
         self.session.try_lock().ok().and_then(|g| g.clone())
     }
     pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> { self.low_agent.clone() }
-    pub fn get_agent(&self) -> Option<Arc<LockNetAgent>> { self.high_agent.clone() }
     pub fn store(&self) -> Arc<dyn CryptoStore> { self.store.clone() }
 
     pub async fn connection_request(&mut self, creds: Credentials) -> Result<LockNetSessionContext> {
@@ -164,24 +160,17 @@ impl LockNetClient {
             }
         }
 
-        let high_agent = Arc::new(LockNetAgent::new(low_agent.clone()));
-
         if self.config.sync_on_connect {
             let _ = low_agent.events().sync_until_empty(100).await;
         }
 
         self.runner = Some(RunnerHandle { shutdown: cmd_tx, join });
         self.low_agent = Some(low_agent);
-        self.high_agent = Some(high_agent);
 
         Ok(ctx)
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
-        if let Some(high) = self.high_agent.take() {
-            let mut high = Arc::try_unwrap(high).ok().unwrap_or_else(|| panic!("Arc<LockNetAgent> held externally"));
-            high.shutdown().await;
-        }
         self.low_agent = None;
         if let Some(handle) = self.runner.take() {
             let (tx, rx) = tokio::sync::oneshot::channel();

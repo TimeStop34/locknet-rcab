@@ -1,5 +1,6 @@
 use vodozemac::megolm::{
-    GroupSession, InboundGroupSession, MegolmMessage, SessionConfig, SessionKey,
+    ExportedSessionKey, GroupSession, InboundGroupSession, MegolmMessage, SessionConfig,
+    SessionKey,
 };
 use crate::core::errors::{LockNetError, Result};
 
@@ -7,7 +8,8 @@ pub const MEGOLM_ALGORITHM: &str = "ln.encryption.megolm.v1";
 
 pub fn create_outbound() -> (GroupSession, String) {
     let session = GroupSession::new(SessionConfig::version_1());
-    (session, session.session_key().to_base64())
+    let key = session.session_key().to_base64();
+    (session, key)
 }
 
 pub fn session_id(session: &GroupSession) -> String {
@@ -19,8 +21,19 @@ pub fn encrypt(session: &mut GroupSession, plaintext: &str) -> String {
 }
 
 pub fn import_inbound(session_key_b64: &str) -> Result<InboundGroupSession> {
-    let key = SessionKey::from_base64(session_key_b64).map_err(|e| LockNetError::InvalidResponse(format!("megolm key b64: {e}")))?;
-    Ok(InboundGroupSession::new(&key, SessionConfig::version_1()))
+    // Пробуем v2 (нативный SessionKey — приходит из GroupSession::session_key
+    // и из ln.encryption.group_key)
+    if let Ok(key) = SessionKey::from_base64(session_key_b64) {
+        return Ok(InboundGroupSession::new(&key, SessionConfig::version_1()));
+    }
+    // Пробуем v1 (ExportedSessionKey — приходит из InboundGroupSession::export_at,
+    // используется для backup)
+    if let Ok(key) = ExportedSessionKey::from_base64(session_key_b64) {
+        return Ok(InboundGroupSession::import(&key, SessionConfig::version_1()));
+    }
+    Err(LockNetError::InvalidResponse(
+        "megolm key: invalid v1 or v2 key".into(),
+    ))
 }
 
 pub fn decrypt_inbound(session: &mut InboundGroupSession, ciphertext_b64: &str) -> Result<String> {

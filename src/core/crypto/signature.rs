@@ -46,7 +46,9 @@ pub fn verify_b64(pubkey_b64: &str, message_b64: &str, sig_b64: &str) -> Result<
 
 fn decode_b64(s: &str) -> Result<Vec<u8>> {
     use base64::Engine;
-    base64::engine::general_purpose::STANDARD.decode(s)
+    base64::engine::general_purpose::STANDARD_NO_PAD.decode(s)
+        .or_else(|_| base64::engine::general_purpose::STANDARD.decode(s))
         .or_else(|_| base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(s))
+        .or_else(|_| base64::engine::general_purpose::URL_SAFE.decode(s))
         .map_err(|e| LockNetError::InvalidResponse(format!("b64: {e}")))
 }

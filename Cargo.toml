@@ -22,6 +22,11 @@ uuid = { version = "1", features = ["v4"] }
 base64 = "0.22"
 vodozemac = "0.8"
 getrandom = "0.2"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
+hkdf = "0.12"
+sha2 = "0.10"
+hmac = "0.12"
+crypto_secretbox = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full"] }

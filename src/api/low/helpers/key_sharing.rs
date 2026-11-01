@@ -1,0 +1,389 @@
+use std::sync::Arc;
+use std::time::Duration;
+
+use serde_json::{json, Value};
+use tokio::sync::broadcast;
+
+use crate::api::low::event::Event;
+use crate::api::low::helpers::megolm::LockNetMegolmHelper;
+use crate::api::low::helpers::olm::LockNetOlmHelper;
+use crate::core::errors::{LockNetError, Result};
+
+const LN_KEY_REQUEST: &str = "ln.encryption.key_request";
+const LN_KEY_REQUEST_DONE: &str = "ln.encryption.key_request_done";
+const LN_KEY_DENIED: &str = "ln.encryption.key_denied";
+const LN_GROUP_KEY: &str = "ln.encryption.group_key";
+
+const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+// ---- Responder side ----
+
+#[derive(Debug, Clone)]
+pub struct IncomingKeyRequest {
+    pub transaction_id: String,
+    pub from_session: i64,
+    pub chat_ids: Vec<i64>,
+    pub have: Vec<String>,
+}
+
+pub struct LockNetKeySharingHelper {
+    pub(crate) event_tx: broadcast::Sender<Event>,
+    pub(crate) olm: Arc<LockNetOlmHelper>,
+    pub(crate) megolm: Arc<LockNetMegolmHelper>,
+    pub(crate) our_session_id: i64,
+}
+
+impl LockNetKeySharingHelper {
+    pub async fn request(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        chat_ids: Vec<i64>,
+    ) -> Result<KeyRequestFlow> {
+        KeyRequestFlow::new(
+            self.event_tx.subscribe(),
+            self.olm.clone(),
+            self.megolm.clone(),
+            self.our_session_id,
+            to_user,
+            to_session,
+            chat_ids,
+        )
+        .await
+    }
+
+    /// Ждёт первый `ln.encryption.key_request`.
+    ///
+    /// `rx` должен быть подписан **до** того, как peer отправит запрос:
+    /// ```ignore
+    /// let mut rx = low.subscribe();
+    /// let _flow = peer_low.key_sharing().request(...).await?;
+    /// let req = low.key_sharing().wait_request(&mut rx, timeout).await?;
+    /// ```
+    pub async fn wait_request(
+        &self,
+        rx: &mut broadcast::Receiver<Event>,
+        timeout: Duration,
+    ) -> Result<IncomingKeyRequest> {
+        let deadline = tokio::time::Instant::now() + timeout;
+
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(LockNetError::Timeout(timeout));
+            }
+
+            match tokio::time::timeout(remaining, rx.recv()).await {
+                Ok(Ok(Event::ToDevice(payload))) => {
+                    let sender_session = payload.sender_session_id;
+                    if let Some(pt) = self.olm.decrypt(payload).wait().await? {
+                        if let Ok(val) = serde_json::from_str::<Value>(&pt) {
+                            if val.get("type").and_then(|v| v.as_str()) == Some(LN_KEY_REQUEST) {
+                                let content = val
+                                    .get("content")
+                                    .ok_or_else(|| LockNetError::InvalidResponse("key_request: no content".into()))?;
+                                let transaction_id = content
+                                    .get("transaction_id")
+                                    .and_then(|v| v.as_str())
+                                    .ok_or_else(|| LockNetError::InvalidResponse("key_request: no transaction_id".into()))?
+                                    .to_string();
+                                let chat_ids = parse_chat_ids(content)?;
+                                let have = parse_have(content)?;
+                                return Ok(IncomingKeyRequest {
+                                    transaction_id,
+                                    from_session: sender_session,
+                                    chat_ids,
+                                    have,
+                                });
+                            }
+                        }
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => return Err(LockNetError::RunnerDown),
+                Err(_) => return Err(LockNetError::Timeout(timeout)),
+            }
+        }
+    }
+
+    pub async fn send_group_key(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        transaction_id: String,
+        chat_id: i64,
+        megolm_session_id: String,
+        session_key: String,
+    ) -> Result<()> {
+        let content = json!({
+            "type": LN_GROUP_KEY,
+            "content": {
+                "transaction_id": transaction_id,
+                "algorithm": crate::core::crypto::megolm::MEGOLM_ALGORITHM,
+                "chat_id": chat_id,
+                "megolm_session_id": megolm_session_id,
+                "session_key": session_key,
+            }
+        });
+        self.olm.send(to_user, to_session, content.to_string()).wait().await
+    }
+
+    pub async fn send_done(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        transaction_id: String,
+        count: u32,
+    ) -> Result<()> {
+        let content = json!({
+            "type": LN_KEY_REQUEST_DONE,
+            "content": {
+                "transaction_id": transaction_id,
+                "count": count,
+            }
+        });
+        self.olm.send(to_user, to_session, content.to_string()).wait().await
+    }
+
+    pub async fn send_denied(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        transaction_id: String,
+        reason: String,
+    ) -> Result<()> {
+        let content = json!({
+            "type": LN_KEY_DENIED,
+            "content": {
+                "transaction_id": transaction_id,
+                "reason": reason,
+            }
+        });
+        self.olm.send(to_user, to_session, content.to_string()).wait().await
+    }
+}
+
+// ---- Requester side ----
+
+#[derive(Debug)]
+pub enum KeyRequestStep {
+    GroupKeyImported {
+        chat_id: i64,
+        megolm_session_id: String,
+    },
+    Done {
+        total_imported: u32,
+    },
+    Denied {
+        reason: String,
+    },
+    Cancelled(String),
+}
+
+#[derive(Debug, Clone)]
+enum InternalState {
+    Waiting,
+    Done { total: u32 },
+    Denied(String),
+    Cancelled(String),
+}
+
+pub struct KeyRequestFlow {
+    txid: String,
+    to_user: i64,
+    to_session: i64,
+    chat_ids: Vec<i64>,
+    olm: Arc<LockNetOlmHelper>,
+    megolm: Arc<LockNetMegolmHelper>,
+    event_rx: broadcast::Receiver<Event>,
+    imported_count: u32,
+    state: InternalState,
+}
+
+impl KeyRequestFlow {
+    async fn new(
+        event_rx: broadcast::Receiver<Event>,
+        olm: Arc<LockNetOlmHelper>,
+        megolm: Arc<LockNetMegolmHelper>,
+        our_session_id: i64,
+        to_user: i64,
+        to_session: i64,
+        chat_ids: Vec<i64>,
+    ) -> Result<Self> {
+        let txid = generate_txid();
+
+        let have: Vec<String> = {
+            let store = olm_store_via_megolm(&megolm);
+            store
+                .megolm_inbound_all()
+                .into_iter()
+                .filter(|(cid, _)| chat_ids.contains(cid))
+                .map(|(cid, mid)| format!("{cid}:{mid}"))
+                .collect()
+        };
+
+        let content = json!({
+            "type": LN_KEY_REQUEST,
+            "content": {
+                "transaction_id": txid,
+                "chat_ids": chat_ids,
+                "have": have,
+            }
+        });
+
+        olm.send(to_user, to_session, content.to_string()).wait().await?;
+
+        let _ = our_session_id;
+
+        Ok(Self {
+            txid,
+            to_user,
+            to_session,
+            chat_ids,
+            olm,
+            megolm,
+            event_rx,
+            imported_count: 0,
+            state: InternalState::Waiting,
+        })
+    }
+
+    pub fn transaction_id(&self) -> &str { &self.txid }
+    pub fn chat_ids(&self) -> &[i64] { &self.chat_ids }
+    pub fn imported_count(&self) -> u32 { self.imported_count }
+
+    pub async fn next(&mut self) -> Result<KeyRequestStep> {
+        match self.state.clone() {
+            InternalState::Done { total } => return Ok(KeyRequestStep::Done { total_imported: total }),
+            InternalState::Denied(reason) => return Ok(KeyRequestStep::Denied { reason }),
+            InternalState::Cancelled(reason) => return Ok(KeyRequestStep::Cancelled(reason)),
+            InternalState::Waiting => {}
+        }
+
+        let deadline = tokio::time::Instant::now() + DEFAULT_WAIT_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(LockNetError::Timeout(DEFAULT_WAIT_TIMEOUT));
+            }
+
+            match tokio::time::timeout(remaining, self.event_rx.recv()).await {
+                Ok(Ok(Event::ToDevice(payload))) => {
+                    if let Some(pt) = self.olm.decrypt(payload).wait().await? {
+                        if let Some(step) = self.handle_plaintext(&pt).await? {
+                            return Ok(step);
+                        }
+                    }
+                }
+                Ok(Ok(_)) => continue,
+                Ok(Err(_)) => return Err(LockNetError::RunnerDown),
+                Err(_) => return Err(LockNetError::Timeout(DEFAULT_WAIT_TIMEOUT)),
+            }
+        }
+    }
+
+    async fn handle_plaintext(&mut self, pt: &str) -> Result<Option<KeyRequestStep>> {
+        let val: Value = match serde_json::from_str(pt) {
+            Ok(v) => v,
+            Err(_) => return Ok(None),
+        };
+        let msg_type = val.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        match msg_type {
+            LN_GROUP_KEY => {
+                let content = val.get("content").ok_or_else(|| {
+                    LockNetError::InvalidResponse("group_key: no content".into())
+                })?;
+                let chat_id = content
+                    .get("chat_id")
+                    .and_then(|v| v.as_i64())
+                    .ok_or_else(|| LockNetError::InvalidResponse("group_key: no chat_id".into()))?;
+                let megolm_session_id = content
+                    .get("megolm_session_id")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| LockNetError::InvalidResponse("group_key: no megolm_session_id".into()))?
+                    .to_string();
+                let session_key = content
+                    .get("session_key")
+                    .and_then(|v| v.as_str())
+                    .ok_or_else(|| LockNetError::InvalidResponse("group_key: no session_key".into()))?
+                    .to_string();
+
+                self.megolm
+                    .import(chat_id, megolm_session_id.clone(), session_key)
+                    .await?;
+                self.imported_count += 1;
+
+                Ok(Some(KeyRequestStep::GroupKeyImported { chat_id, megolm_session_id }))
+            }
+            LN_KEY_REQUEST_DONE => {
+                let total = self.imported_count;
+                self.state = InternalState::Done { total };
+                Ok(Some(KeyRequestStep::Done { total_imported: total }))
+            }
+            LN_KEY_DENIED => {
+                let reason = val
+                    .pointer("/content/reason")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("denied")
+                    .to_string();
+                self.state = InternalState::Denied(reason.clone());
+                Ok(Some(KeyRequestStep::Denied { reason }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub async fn cancel(&mut self) -> Result<()> {
+        if matches!(
+            self.state,
+            InternalState::Done { .. } | InternalState::Denied(_) | InternalState::Cancelled(_)
+        ) {
+            return Ok(());
+        }
+        self.state = InternalState::Cancelled("cancelled by user".into());
+        Ok(())
+    }
+}
+
+fn parse_chat_ids(content: &Value) -> Result<Vec<i64>> {
+    let arr = content
+        .get("chat_ids")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| LockNetError::InvalidResponse("key_request: no chat_ids".into()))?;
+    let mut out = Vec::with_capacity(arr.len());
+    for v in arr {
+        let id = v
+            .as_i64()
+            .ok_or_else(|| LockNetError::InvalidResponse("key_request: chat_ids must be i64".into()))?;
+        out.push(id);
+    }
+    Ok(out)
+}
+
+fn parse_have(content: &Value) -> Result<Vec<String>> {
+    let arr = content.get("have").and_then(|v| v.as_array());
+    match arr {
+        None => Ok(Vec::new()),
+        Some(arr) => {
+            let mut out = Vec::with_capacity(arr.len());
+            for v in arr {
+                let s = v
+                    .as_str()
+                    .ok_or_else(|| LockNetError::InvalidResponse("key_request: have items must be strings".into()))?;
+                out.push(s.to_string());
+            }
+            Ok(out)
+        }
+    }
+}
+
+fn olm_store_via_megolm(megolm: &LockNetMegolmHelper) -> Arc<dyn crate::core::crypto::CryptoStore> {
+    megolm.store.clone()
+}
+
+fn generate_txid() -> String {
+    let mut bytes = [0u8; 8];
+    getrandom::getrandom(&mut bytes).expect("getrandom");
+    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+}
