@@ -52,14 +52,49 @@ impl LockNetKeySharingHelper {
         .await
     }
 
+    /// Отправляет `ln.encryption.key_request`, возвращает `transaction_id`.
+    ///
+    /// **НЕ подписывается** на `low.event_tx` — вызывающий должен сам слушать
+    /// `HighEvent::KeyRequest{Imported,Done,Denied}`, которые эмитит `LockNetAgent`
+    /// после расшифровки ответа. Так избегаем гонки за Olm-сессию (ratchet stateful).
+    pub async fn send_request_only(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        chat_ids: Vec<i64>,
+    ) -> Result<String> {
+        let txid = generate_txid();
+
+        let have: Vec<String> = {
+            let store = olm_store_via_megolm(&self.megolm);
+            store
+                .megolm_inbound_all()
+                .into_iter()
+                .filter(|(cid, _)| chat_ids.contains(cid))
+                .map(|(cid, mid)| format!("{cid}:{mid}"))
+                .collect()
+        };
+
+        let content = json!({
+            "type": LN_KEY_REQUEST,
+            "content": {
+                "transaction_id": txid,
+                "chat_ids": chat_ids,
+                "have": have,
+            }
+        });
+
+        self.olm
+            .send(to_user, to_session, content.to_string())
+            .wait()
+            .await?;
+
+        Ok(txid)
+    }
+
     /// Ждёт первый `ln.encryption.key_request`.
     ///
-    /// `rx` должен быть подписан **до** того, как peer отправит запрос:
-    /// ```ignore
-    /// let mut rx = low.subscribe();
-    /// let _flow = peer_low.key_sharing().request(...).await?;
-    /// let req = low.key_sharing().wait_request(&mut rx, timeout).await?;
-    /// ```
+    /// `rx` должен быть подписан **до** того, как peer отправит запрос.
     pub async fn wait_request(
         &self,
         rx: &mut broadcast::Receiver<Event>,
@@ -163,7 +198,14 @@ impl LockNetKeySharingHelper {
     }
 }
 
-// ---- Requester side ----
+// ---- Requester side (low-level, standalone flow) ----
+//
+// ВНИМАНИЕ: этот flow сам дешифрует `to_device` через свой `olm.decrypt`.
+// Если на этом же клиенте работает `LockNetAgent` (high), то он ТОЖЕ будет
+// дешифровать те же самые события → гонка за stateful Olm-сессию.
+//
+// Для случая «high agent + key_request» используйте
+// `LockNetKeySharingHelper::send_request_only` + `HighEvent::KeyRequest*`.
 
 #[derive(Debug)]
 pub enum KeyRequestStep {
@@ -190,7 +232,9 @@ enum InternalState {
 
 pub struct KeyRequestFlow {
     txid: String,
+    #[allow(dead_code)]
     to_user: i64,
+    #[allow(dead_code)]
     to_session: i64,
     chat_ids: Vec<i64>,
     olm: Arc<LockNetOlmHelper>,

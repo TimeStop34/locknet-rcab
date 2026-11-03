@@ -11,6 +11,7 @@ use crate::api::low::helpers::olm::LockNetOlmHelper;
 pub struct MegolmSessionInfo { pub chat_id: i64, pub megolm_session_id: String, pub session_key: String }
 
 pub struct LockNetMegolmHelper {
+    #[allow(dead_code)]
     pub(crate) cmd_tx: mpsc::Sender<Cmd>,
     pub(crate) store: Arc<dyn CryptoStore>,
     pub(crate) olm: Arc<LockNetOlmHelper>,
@@ -64,9 +65,32 @@ impl LockNetMegolmHelper {
 
     pub async fn share_group_key(&self, chat_id: i64, to_user: i64, to_session: i64) -> Result<()> {
         let info = self.ensure_session(chat_id).await?;
+        self.share_group_key_with_session_key(
+            chat_id,
+            to_user,
+            to_session,
+            info.megolm_session_id,
+            info.session_key,
+        )
+        .await
+    }
+
+    pub async fn share_group_key_with_session_key(
+        &self,
+        chat_id: i64,
+        to_user: i64,
+        to_session: i64,
+        megolm_session_id: String,
+        session_key: String,
+    ) -> Result<()> {
         let content = json!({
             "type": "ln.encryption.group_key",
-            "content": { "algorithm": MEGOLM_ALGORITHM, "chat_id": chat_id, "megolm_session_id": info.megolm_session_id, "session_key": info.session_key }
+            "content": {
+                "algorithm": MEGOLM_ALGORITHM,
+                "chat_id": chat_id,
+                "megolm_session_id": megolm_session_id,
+                "session_key": session_key,
+            }
         });
         self.olm.send(to_user, to_session, content.to_string()).wait().await
     }

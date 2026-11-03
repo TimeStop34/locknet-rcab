@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
 use chrono::Utc;
@@ -6,6 +6,7 @@ use serde_json::json;
 use tokio::sync::{broadcast, mpsc, Mutex};
 use tokio::task::JoinHandle;
 
+use crate::api::high::agent::LockNetAgent;
 use crate::api::low::agent::LockNetLowAgent;
 use crate::api::low::command::{dispatch, Cmd};
 use crate::api::low::event::Event;
@@ -25,6 +26,7 @@ pub struct LockNetClient {
     http: reqwest::Client,
     session: Arc<Mutex<Option<LockNetSessionContext>>>,
     low_agent: Option<Arc<LockNetLowAgent>>,
+    high_agent: OnceLock<Arc<LockNetAgent>>,
     runner: Option<RunnerHandle>,
     event_tx: broadcast::Sender<Event>,
     store: Arc<dyn CryptoStore>,
@@ -49,6 +51,7 @@ impl LockNetClient {
             http,
             session: Arc::new(Mutex::new(None)),
             low_agent: None,
+            high_agent: OnceLock::new(),
             runner: None,
             event_tx,
             store,
@@ -56,10 +59,29 @@ impl LockNetClient {
     }
 
     pub fn config(&self) -> &LockNetConfig { &self.config }
+
     pub fn session(&self) -> Option<LockNetSessionContext> {
         self.session.try_lock().ok().and_then(|g| g.clone())
     }
+
     pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> { self.low_agent.clone() }
+
+    /// Возвращает agent, создавая его **лениво** при первом вызове.
+    ///
+    /// Это важно: agent подписывается на `low.event_tx` и дешифрует `to_device`
+    /// через Olm. Если agent создан, но пользователь работает только с low-API
+    /// (`low.olm().decrypt()`), возникает race за stateful Olm-сессию.
+    ///
+    /// Поэтому: **не** создаём agent до тех пор, пока пользователь явно не
+    /// запросил high-API. Low-only потребители живут без agent.
+    pub fn get_agent(&self) -> Option<Arc<LockNetAgent>> {
+        let low = self.low_agent.as_ref()?;
+        let agent = self
+            .high_agent
+            .get_or_init(|| Arc::new(LockNetAgent::new(low.clone())));
+        Some(agent.clone())
+    }
+
     pub fn store(&self) -> Arc<dyn CryptoStore> { self.store.clone() }
 
     pub async fn connection_request(&mut self, creds: Credentials) -> Result<LockNetSessionContext> {
@@ -164,6 +186,8 @@ impl LockNetClient {
             let _ = low_agent.events().sync_until_empty(100).await;
         }
 
+        // high_agent создаётся лениво в get_agent() — не создаём здесь.
+
         self.runner = Some(RunnerHandle { shutdown: cmd_tx, join });
         self.low_agent = Some(low_agent);
 
@@ -171,6 +195,10 @@ impl LockNetClient {
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
+        // Сначала останавливаем agent (он держит подписку на low.event_tx).
+        if let Some(high) = self.high_agent.take() {
+            high.shutdown().await;
+        }
         self.low_agent = None;
         if let Some(handle) = self.runner.take() {
             let (tx, rx) = tokio::sync::oneshot::channel();

@@ -8,6 +8,7 @@ use crate::core::crypto::CryptoStore;
 use crate::core::errors::Result;
 
 pub struct LockNetVerificationHelper {
+    #[allow(dead_code)]
     pub(crate) cmd_tx: mpsc::Sender<Cmd>,
     pub(crate) store: Arc<dyn CryptoStore>,
     pub(crate) event_tx: broadcast::Sender<Event>,

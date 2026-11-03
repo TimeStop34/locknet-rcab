@@ -1,9 +1,10 @@
 pub mod agent;
 pub mod event;
+pub(crate) mod group_key;
 pub mod models;
 pub mod security;
-pub mod services;
 pub(crate) mod state;
+pub mod verification;
 
 pub use agent::LockNetAgent;
 pub use event::HighEvent;
@@ -16,8 +17,4 @@ pub use models::{
     user::{SessionInfo, User},
 };
 pub use security::SecurityHelper;
-pub use services::{
-    backup_flow::{BackupExportResult, BackupFlow, BackupImportResult, RecoveryKey},
-    key_sharing::{KeySharingFlow, KeySharingStep},
-    qr::{QrCode, QrFlow, QrMode, QrStep},
-};
+pub use verification::{QrCode, QrFlow, QrMode, QrStep, SasEmoji, SasFlow, SasStatus, SasStep};

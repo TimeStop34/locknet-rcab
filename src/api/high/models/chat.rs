@@ -1,25 +1,51 @@
 use std::sync::Arc;
+use std::time::Duration;
 use chrono::{DateTime, Utc};
+use tokio::sync::{broadcast, RwLock};
 use crate::api::low::agent::LockNetLowAgent;
 use crate::api::low::models::Encrypted;
 use crate::core::crypto::megolm::MEGOLM_ALGORITHM;
-use crate::core::errors::Result;
+use crate::core::errors::{LockNetError, Result};
 use super::group::Group;
 use super::message::Message;
 use super::reaction::Reaction;
 use super::user::User;
+use crate::api::high::event::HighEvent;
+use crate::api::high::state::ClientState;
 
 pub(crate) const PLAINTEXT_ALGORITHM: &str = "ln.plaintext.v1";
 
-pub(crate) struct ChatInner { pub(crate) low: Arc<LockNetLowAgent>, pub(crate) group: Group }
+const KEY_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+pub(crate) struct ChatInner {
+    pub(crate) low: Arc<LockNetLowAgent>,
+    pub(crate) group: Group,
+    pub(crate) state: Arc<RwLock<ClientState>>,
+    pub(crate) high_event_tx: broadcast::Sender<HighEvent>,
+    pub(crate) coverage: RwLock<Option<(String, usize)>>,
+}
 
 #[derive(Clone)]
 pub struct Chat { pub(crate) inner: Arc<ChatInner> }
 
 impl Chat {
-    pub(crate) fn new(low: Arc<LockNetLowAgent>, group: Group) -> Self {
-        Self { inner: Arc::new(ChatInner { low, group }) }
+    pub(crate) fn new(
+        low: Arc<LockNetLowAgent>,
+        group: Group,
+        state: Arc<RwLock<ClientState>>,
+        high_event_tx: broadcast::Sender<HighEvent>,
+    ) -> Self {
+        Self {
+            inner: Arc::new(ChatInner {
+                low,
+                group,
+                state,
+                high_event_tx,
+                coverage: RwLock::new(None),
+            }),
+        }
     }
+
     pub fn id(&self) -> i64 { self.inner.group.id }
     pub fn name(&self) -> String { self.inner.group.name.clone() }
     pub fn is_public(&self) -> bool { self.inner.group.is_public }
@@ -32,26 +58,85 @@ impl Chat {
     pub fn member_count(&self) -> usize { self.inner.group.member_count }
     pub fn group(&self) -> &Group { &self.inner.group }
 
-    pub async fn refresh(&self) -> Result<Group> { self.inner.low.groups().info(self.id()).await }
+    pub async fn refresh_dto(&self) -> Result<crate::api::low::models::Group> {
+        self.inner.low.groups().info(self.id()).await
+    }
 
     pub async fn send(&self, text: impl Into<String>) -> Result<Message> {
         let text = text.into();
         let chat_id = self.id();
         let low = self.inner.low.clone();
+
         let encrypted = if self.is_encrypted() {
-            low.megolm().ensure_session(chat_id).await?;
+            let info = low.megolm().ensure_session(chat_id).await?;
+
+            let need_fanout = {
+                let guard = self.inner.coverage.read().await;
+                match &*guard {
+                    Some((sid, cnt)) => {
+                        sid != &info.megolm_session_id
+                            || *cnt != self.inner.group.member_count
+                    }
+                    None => true,
+                }
+            };
+
+            if need_fanout {
+                let fresh = low.groups().info(chat_id).await.ok();
+                let (participant_ids, member_count): (Vec<i64>, usize) =
+                    match fresh.as_ref().and_then(|g| g.members.as_ref()) {
+                        Some(list) => (
+                            list.iter().map(|m| m.user_id).collect(),
+                            list.len(),
+                        ),
+                        None => (
+                            self.inner
+                                .group
+                                .members
+                                .iter()
+                                .map(|m| m.user.id)
+                                .collect(),
+                            self.inner.group.member_count,
+                        ),
+                    };
+                if !participant_ids.is_empty() {
+                    crate::api::high::group_key::fan_out_group_key(
+                        &low,
+                        chat_id,
+                        &participant_ids,
+                        &info,
+                    )
+                    .await?;
+                }
+                *self.inner.coverage.write().await =
+                    Some((info.megolm_session_id.clone(), member_count));
+            }
+
             low.megolm().encrypt(chat_id, &text).await?
         } else {
             Encrypted {
-                algorithm: PLAINTEXT_ALGORITHM.into(), sender_key: String::new(), sender_session_id: low.session_id(),
-                megolm_session_id: String::new(), ciphertext: base64_encode(text.as_bytes()),
+                algorithm: PLAINTEXT_ALGORITHM.into(),
+                sender_key: String::new(),
+                sender_session_id: low.session_id(),
+                megolm_session_id: String::new(),
+                ciphertext: base64_encode(text.as_bytes()),
             }
         };
+
         let ack = low.messages().send(chat_id, encrypted.clone()).await?;
         Ok(Message {
-            id: ack.message_id, chat_id, author: User::unknown(low.user_id()), author_session_id: low.session_id(),
-            text: Some(text), encrypted: encrypted.algorithm == MEGOLM_ALGORITHM, encrypted_payload: Some(encrypted),
-            thread_id: None, created_at: ack.created_at, edited_at: None, deleted: false, reactions: Vec::new(),
+            id: ack.message_id,
+            chat_id,
+            author: User::unknown(low.user_id()),
+            author_session_id: low.session_id(),
+            text: Some(text),
+            encrypted: encrypted.algorithm == MEGOLM_ALGORITHM,
+            encrypted_payload: Some(encrypted),
+            thread_id: None,
+            created_at: ack.created_at,
+            edited_at: None,
+            deleted: false,
+            reactions: Vec::new(),
         })
     }
 
@@ -61,9 +146,18 @@ impl Chat {
         let ack = low.messages().send(chat_id, encrypted.clone()).await?;
         let text = low.megolm().decrypt(chat_id, &encrypted).await.ok().flatten();
         Ok(Message {
-            id: ack.message_id, chat_id, author: User::unknown(low.user_id()), author_session_id: low.session_id(),
-            text, encrypted: true, encrypted_payload: Some(encrypted), thread_id: None,
-            created_at: ack.created_at, edited_at: None, deleted: false, reactions: Vec::new(),
+            id: ack.message_id,
+            chat_id,
+            author: User::unknown(low.user_id()),
+            author_session_id: low.session_id(),
+            text,
+            encrypted: true,
+            encrypted_payload: Some(encrypted),
+            thread_id: None,
+            created_at: ack.created_at,
+            edited_at: None,
+            deleted: false,
+            reactions: Vec::new(),
         })
     }
 
@@ -72,23 +166,182 @@ impl Chat {
         let low = self.inner.low.clone();
         let page = low.messages().get(chat_id, before, limit).await?;
         let mut result = Vec::with_capacity(page.messages.len());
+        let mut missing: Vec<i64> = Vec::new();
+
         for dto in page.messages {
             let encrypted = dto.encrypted.clone();
-            let text = match &encrypted {
+            let (text, was_encrypted) = match &encrypted {
                 Some(enc) => {
-                    if enc.algorithm == PLAINTEXT_ALGORITHM { base64_decode_str(&enc.ciphertext) }
-                    else { low.megolm().decrypt(chat_id, enc).await.ok().flatten() }
+                    if enc.algorithm == PLAINTEXT_ALGORITHM {
+                        (base64_decode_str(&enc.ciphertext), false)
+                    } else {
+                        let t = low.megolm().decrypt(chat_id, enc).await.ok().flatten();
+                        let was_enc = t.is_none();
+                        if was_enc {
+                            missing.push(dto.message_id);
+                        }
+                        (t, true)
+                    }
                 }
-                None => None,
+                None => (None, false),
             };
+
             result.push(Message {
-                id: dto.message_id, chat_id: dto.chat_id, author: User::unknown(dto.author_id),
-                author_session_id: dto.author_session_id, text, encrypted: encrypted.is_some(), encrypted_payload: encrypted,
-                thread_id: dto.thread_id, created_at: dto.created_at, edited_at: dto.edited_at, deleted: dto.deleted,
-                reactions: dto.reactions.into_iter().map(|r| Reaction { emoji: r.emoji, user_ids: r.user_ids, count: r.count }).collect(),
+                id: dto.message_id,
+                chat_id: dto.chat_id,
+                author: User::unknown(dto.author_id),
+                author_session_id: dto.author_session_id,
+                text,
+                encrypted: was_encrypted,
+                encrypted_payload: encrypted,
+                thread_id: dto.thread_id,
+                created_at: dto.created_at,
+                edited_at: dto.edited_at,
+                deleted: dto.deleted,
+                reactions: dto
+                    .reactions
+                    .into_iter()
+                    .map(|r| Reaction { emoji: r.emoji, user_ids: r.user_ids, count: r.count })
+                    .collect(),
             });
         }
+
+        if !missing.is_empty() {
+            let mut st = self.inner.state.write().await;
+            for mid in &missing {
+                st.push_pending_decrypt(chat_id, *mid);
+            }
+        }
+
         Ok(result)
+    }
+
+    /// Возвращает `(pending_count, imported)` — сколько сообщений ждут ключа
+    /// и сколько ключей удалось импортировать после запроса.
+    ///
+    /// Использует `HighEvent::KeyRequest{Imported,Done,Denied}` —
+    /// дешифрацией `to_device` занимается только `LockNetAgent`,
+    /// гонки за stateful Olm-сессию нет.
+    pub async fn request_missing_keys(&self) -> Result<(usize, u32)> {
+        let chat_id = self.id();
+        let low = self.inner.low.clone();
+
+        let pending = {
+            let st = self.inner.state.read().await;
+            st.pending_decrypt_for(chat_id)
+        };
+        if pending.is_empty() {
+            return Ok((0, 0));
+        }
+
+        let our_uid = low.user_id();
+        let our_sid = low.session_id();
+        let created_by = self.inner.group.created_by;
+
+        let mut query_uids: Vec<i64> = vec![our_uid];
+        if created_by != 0 && created_by != our_uid {
+            query_uids.push(created_by);
+        }
+        let all_sessions = low.keys().query(query_uids.clone()).await?;
+
+        let mut candidates: Vec<(i64, i64)> = Vec::new();
+        if let Some(sess) = all_sessions.get(&our_uid) {
+            for sid in sess.keys() {
+                if *sid != our_sid {
+                    candidates.push((our_uid, *sid));
+                }
+            }
+        }
+        if created_by != 0 && created_by != our_uid {
+            if let Some(sess) = all_sessions.get(&created_by) {
+                for sid in sess.keys() {
+                    candidates.push((created_by, *sid));
+                }
+            }
+        }
+
+        let mut last_err: Option<LockNetError> = None;
+        let mut imported_total = 0u32;
+        let mut any_done = false;
+
+        for (target_uid, target_sid) in candidates {
+            // Подписка ДО отправки — чтобы не пропустить события
+            let mut high_rx = self.inner.high_event_tx.subscribe();
+
+            let txid = match low
+                .key_sharing()
+                .send_request_only(target_uid, target_sid, vec![chat_id])
+                .await
+            {
+                Ok(t) => t,
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
+            };
+
+            let mut session_imported = 0u32;
+            let mut session_done = false;
+            let mut denied_reason: Option<String> = None;
+
+            let deadline = tokio::time::Instant::now() + KEY_REQUEST_TIMEOUT;
+            loop {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT));
+                    break;
+                }
+                match tokio::time::timeout(remaining, high_rx.recv()).await {
+                    Ok(Ok(HighEvent::KeyRequestImported { txid: t, .. })) if t == txid => {
+                        session_imported += 1;
+                    }
+                    Ok(Ok(HighEvent::KeyRequestDone { txid: t, total_imported })) if t == txid => {
+                        session_imported = total_imported;
+                        session_done = true;
+                        break;
+                    }
+                    Ok(Ok(HighEvent::KeyRequestDenied { txid: t, reason })) if t == txid => {
+                        denied_reason = Some(reason);
+                        break;
+                    }
+                    Ok(Ok(_)) => continue,
+                    Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+                    Ok(Err(_)) => {
+                        last_err = Some(LockNetError::RunnerDown);
+                        break;
+                    }
+                    Err(_) => {
+                        last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT));
+                        break;
+                    }
+                }
+            }
+
+            if session_done && session_imported > 0 {
+                imported_total += session_imported;
+                any_done = true;
+                break;
+            }
+            if let Some(r) = denied_reason {
+                last_err = Some(LockNetError::Server {
+                    code: "key_denied".into(),
+                    message: r,
+                });
+            }
+        }
+
+        {
+            let mut st = self.inner.state.write().await;
+            st.clear_pending_decrypt(chat_id);
+        }
+
+        if !any_done && imported_total == 0 {
+            if let Some(e) = last_err {
+                return Err(e);
+            }
+        }
+
+        Ok((pending.len(), imported_total))
     }
 
     pub async fn edit(&self, message_id: i64, new_text: impl Into<String>) -> Result<()> {
@@ -100,21 +353,35 @@ impl Chat {
             low.megolm().encrypt(chat_id, &new_text).await?
         } else {
             Encrypted {
-                algorithm: PLAINTEXT_ALGORITHM.into(), sender_key: String::new(), sender_session_id: low.session_id(),
-                megolm_session_id: String::new(), ciphertext: base64_encode(new_text.as_bytes()),
+                algorithm: PLAINTEXT_ALGORITHM.into(),
+                sender_key: String::new(),
+                sender_session_id: low.session_id(),
+                megolm_session_id: String::new(),
+                ciphertext: base64_encode(new_text.as_bytes()),
             }
         };
         low.messages().edit(message_id, encrypted).await
     }
 
-    pub async fn delete(&self, message_id: i64) -> Result<()> { self.inner.low.messages().delete(message_id).await }
-    pub async fn add_reaction(&self, message_id: i64, emoji: impl Into<String>) -> Result<()> { self.inner.low.messages().add_reaction(message_id, emoji).await }
-    pub async fn remove_reaction(&self, message_id: i64, emoji: impl Into<String>) -> Result<()> { self.inner.low.messages().remove_reaction(message_id, emoji).await }
+    pub async fn delete(&self, message_id: i64) -> Result<()> {
+        self.inner.low.messages().delete(message_id).await
+    }
+
+    pub async fn add_reaction(&self, message_id: i64, emoji: impl Into<String>) -> Result<()> {
+        self.inner.low.messages().add_reaction(message_id, emoji).await
+    }
+
+    pub async fn remove_reaction(&self, message_id: i64, emoji: impl Into<String>) -> Result<()> {
+        self.inner.low.messages().remove_reaction(message_id, emoji).await
+    }
 }
 
 impl std::fmt::Debug for Chat {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("Chat").field("id", &self.inner.group.id).field("name", &self.inner.group.name).finish()
+        f.debug_struct("Chat")
+            .field("id", &self.inner.group.id)
+            .field("name", &self.inner.group.name)
+            .finish()
     }
 }
 

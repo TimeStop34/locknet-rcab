@@ -1,8 +1,9 @@
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use crate::api::low::agent::LockNetLowAgent;
-use crate::api::low::helpers::verification::sas::{SasFlow, SasStep};
-use crate::api::low::models::{CrossSigningKey, CrossSigningKeys, Signatures};
+use crate::api::high::verification::sas::{SasFlow, SasStep, SasStatus, SasEmoji};
+use crate::api::low::helpers::backup::{BackupExportResult, BackupImportResult, RecoveryKey};
+use crate::api::low::models::{BackupVersion, BackupVersionData, CrossSigningKey, CrossSigningKeys, Signatures};
 use crate::core::crypto::signature::{sign_b64, verify_b64, CrossSigningKeysPrivate};
 use crate::core::errors::{LockNetError, Result};
 use super::event::HighEvent;
@@ -21,7 +22,7 @@ impl SecurityHelper {
         let query = match self.low.crypto().query_cross_signing_keys(vec![user_id]).await { Ok(q) => q, Err(_) => return false };
         let entry = match query.get(&user_id) { Some(e) => e, None => return false };
         let our_id = self.low.user_id();
-        let our_sig = match entry.master_key.signatures.get(&our_id).and_then(|m| m.get("user_signing")) { Some(s) => s.clone(), None => return false };
+        let our_sig = match entry.master_key.signatures.get(&our_id.to_string()).and_then(|m| m.get("user_signing")) { Some(s) => s.clone(), None => return false };
         let our_keys = match self.low.store().cross_signing_keys() { Some(k) => k, None => return false };
         let target_msk = entry.master_key.key.clone();
         verify_b64(&our_keys.usk.public_key().to_base64(), &target_msk, &our_sig).is_ok()
@@ -33,7 +34,7 @@ impl SecurityHelper {
         let entry = match query.get(&user_id) { Some(e) => e, None => return false };
         let ssk_pub = match entry.self_signing_key.as_ref() { Some(k) => k.key.clone(), None => return false };
         let device = match entry.devices.get(&session_id) { Some(d) => d, None => return false };
-        let sig = match device.signatures.get(&user_id).and_then(|m| m.get("self_signing")) { Some(s) => s.clone(), None => return false };
+        let sig = match device.signatures.get(&user_id.to_string()).and_then(|m| m.get("self_signing")) { Some(s) => s.clone(), None => return false };
         let ed = match &device.ed25519_key { s if s.is_empty() => return false, s => s.clone() };
         verify_b64(&ssk_pub, &ed, &sig).is_ok()
     }
@@ -84,39 +85,356 @@ impl SecurityHelper {
         Ok(())
     }
 
-    pub async fn sas_start(&self, user_id: i64, session_id: i64) -> Result<Arc<tokio::sync::Mutex<SasFlow>>> {
-        let keys = self.low.store().cross_signing_keys().ok_or_else(|| LockNetError::InvalidResponse("setup_cross_signing required".into()))?;
-        let ed_b64 = { let account = self.low.store().account(); let acc = account.lock().await; acc.ed25519_public_b64() };
-        let flow = self.low.verification().sas_start(user_id, session_id, keys.msk_pub_b64(), ed_b64).await?;
+    // ---- SAS ----
+
+    async fn async_our_keys_and_ed(&self) -> Result<(String, String)> {
+        let keys = self.low.store().cross_signing_keys()
+            .ok_or_else(|| LockNetError::InvalidResponse("setup_cross_signing required".into()))?;
+        let msk_b64 = keys.msk_pub_b64();
+        let ed_b64 = {
+            let account = self.low.store().account();
+            let acc = account.lock().await;
+            acc.ed25519_public_b64()
+        };
+        Ok((msk_b64, ed_b64))
+    }
+
+    async fn fetch_peer_keys(&self, user_id: i64, session_id: i64) -> Result<(String, String)> {
+        let keys = self.low.keys().query(vec![user_id]).await?;
+        let ed = keys
+            .get(&user_id)
+            .and_then(|m| m.get(&session_id))
+            .map(|d| d.ed25519_key.clone())
+            .ok_or_else(|| LockNetError::InvalidArgument(format!(
+                "peer session {session_id} ed25519 not found"
+            )))?;
+        let cs = self.low.crypto().query_cross_signing_keys(vec![user_id]).await?;
+        let msk = cs
+            .get(&user_id)
+            .map(|u| u.master_key.key.clone())
+            .ok_or_else(|| LockNetError::InvalidArgument(format!(
+                "peer {user_id} master key not found"
+            )))?;
+        Ok((ed, msk))
+    }
+
+    async fn resolve_user_for_session(&self, sender_session: i64) -> Option<i64> {
+        let candidates: Vec<i64> = {
+            let st = self.state.read().await;
+            st.users.keys().copied().collect()
+        };
+        if candidates.is_empty() { return None; }
+        let sessions = self.low.keys().query(candidates.clone()).await.ok()?;
+        for uid in candidates {
+            if let Some(map) = sessions.get(&uid) {
+                if map.contains_key(&sender_session) {
+                    return Some(uid);
+                }
+            }
+        }
+        None
+    }
+
+    pub async fn sas_start(&self, user_id: i64, session_id: i64) -> Result<String> {
+        let (msk_b64, ed_b64) = self.async_our_keys_and_ed().await?;
+        let flow = SasFlow::start(
+            self.low.clone(),
+            self.event_tx.subscribe(),
+            user_id,
+            session_id,
+            msk_b64,
+            ed_b64,
+        )
+        .await?;
         let txid = flow.transaction_id().to_string();
         let handle = Arc::new(tokio::sync::Mutex::new(flow));
-        { let mut st = self.state.write().await; st.active_sas.insert(txid, handle.clone()); }
-        Ok(handle)
+        { let mut st = self.state.write().await; st.active_sas.insert(txid.clone(), handle); }
+        Ok(txid)
     }
 
-    pub async fn sas_accept(&self, transaction_id: String, user_id: i64, session_id: i64) -> Result<Arc<tokio::sync::Mutex<SasFlow>>> {
-        let keys = self.low.store().cross_signing_keys().ok_or_else(|| LockNetError::InvalidResponse("setup_cross_signing required".into()))?;
-        let ed_b64 = { let account = self.low.store().account(); let acc = account.lock().await; acc.ed25519_public_b64() };
-        let flow = self.low.verification().sas_start_responder(user_id, session_id, transaction_id.clone(), keys.msk_pub_b64(), ed_b64).await?;
+    pub async fn sas_accept(&self, txid: &str) -> Result<()> {
+        let pending = {
+            let mut st = self.state.write().await;
+            st.pending_sas_starts.remove(txid)
+        }
+        .ok_or_else(|| LockNetError::InvalidArgument(format!(
+            "no pending SAS start with txid {txid}"
+        )))?;
+
+        let peer_uid = match pending.from_user {
+            Some(u) => u,
+            None => self.resolve_user_for_session(pending.from_session).await
+                .ok_or_else(|| LockNetError::InvalidArgument(
+                    "cannot resolve initiator user_id (no shared context)".into()
+                ))?,
+        };
+
+        let (msk_b64, ed_b64) = self.async_our_keys_and_ed().await?;
+        let flow = SasFlow::start_as_responder(
+            self.low.clone(),
+            self.event_tx.subscribe(),
+            txid.to_string(),
+            peer_uid,
+            pending.from_session,
+            msk_b64,
+            ed_b64,
+        )
+        .await?;
+
         let handle = Arc::new(tokio::sync::Mutex::new(flow));
-        { let mut st = self.state.write().await; st.active_sas.insert(transaction_id, handle.clone()); }
-        Ok(handle)
+        { let mut st = self.state.write().await; st.active_sas.insert(txid.to_string(), handle); }
+        Ok(())
     }
 
-    pub async fn sas_next(&self, transaction_id: &str) -> Result<SasStep> {
-        let handle = { let st = self.state.read().await; st.active_sas.get(transaction_id).cloned() }.ok_or_else(|| LockNetError::InvalidResponse("sas flow not found".into()))?;
+    pub async fn sas_decline(&self, txid: &str) -> Result<()> {
+        let mut st = self.state.write().await;
+        if st.pending_sas_starts.remove(txid).is_some() {
+            return Ok(());
+        }
+        drop(st);
+        Err(LockNetError::InvalidArgument(format!(
+            "no pending SAS start with txid {txid}"
+        )))
+    }
+
+    pub async fn sas_cancel(&self, txid: &str) -> Result<()> {
+        let handle = {
+            let mut st = self.state.write().await;
+            st.pending_sas_starts.remove(txid);
+            st.active_sas.remove(txid)
+        };
+        if let Some(h) = handle {
+            let mut guard = h.lock().await;
+            guard.abort().await?;
+        }
+        Ok(())
+    }
+
+    pub async fn sas_next(&self, txid: &str) -> Result<SasStep> {
+        let handle = {
+            let st = self.state.read().await;
+            st.active_sas.get(txid).cloned()
+        }
+        .ok_or_else(|| LockNetError::InvalidArgument(format!(
+            "no active SAS with txid {txid}"
+        )))?;
+
+        let mut guard = handle.lock().await;
+        let step = guard.next().await?;
+        if matches!(step, SasStep::Verified) {
+            let peer_uid = guard.peer_user_id();
+            let peer_sid = guard.peer_session_id();
+            drop(guard);
+
+            {
+                let mut st = self.state.write().await;
+                st.verified_sessions.insert(peer_sid);
+                st.verified_users.insert(peer_uid);
+            }
+            let _ = self.event_tx.send(HighEvent::SessionVerified {
+                user_id: peer_uid,
+                session_id: peer_sid,
+            });
+            let _ = self.event_tx.send(HighEvent::UserVerified { user_id: peer_uid });
+        }
+        Ok(step)
+    }
+
+    pub async fn emojis_get(&self, txid: &str) -> Result<Option<Vec<SasEmoji>>> {
+        let handle = {
+            let st = self.state.read().await;
+            st.active_sas.get(txid).cloned()
+        }
+        .ok_or_else(|| LockNetError::InvalidArgument(format!(
+            "no active SAS with txid {txid}"
+        )))?;
+        let guard = handle.lock().await;
+        Ok(guard.emoji().map(|s| s.to_vec()))
+    }
+
+    pub async fn emoji_confirm(&self, txid: &str, accept: bool) -> Result<()> {
+        let handle = {
+            let st = self.state.read().await;
+            st.active_sas.get(txid).cloned()
+        }
+        .ok_or_else(|| LockNetError::InvalidArgument(format!(
+            "no active SAS with txid {txid}"
+        )))?;
+
+        let mut guard = handle.lock().await;
+        if accept {
+            let peer_uid = guard.peer_user_id();
+            let peer_sid = guard.peer_session_id();
+            let (peer_ed, peer_msk) = self.fetch_peer_keys(peer_uid, peer_sid).await?;
+            guard.set_peer_keys(peer_ed, peer_msk);
+        }
+        guard.confirm_emoji(accept).await
+    }
+
+    pub async fn sas_confirm(&self, txid: &str, accept: bool) -> Result<()> {
+        self.emoji_confirm(txid, accept).await
+    }
+
+    pub async fn sas_remove(&self, txid: &str) {
+        let mut st = self.state.write().await;
+        st.active_sas.remove(txid);
+        st.pending_sas_starts.remove(txid);
+    }
+
+    pub async fn sas_status(&self, txid: &str) -> Option<SasStatus> {
+        let handle = {
+            let st = self.state.read().await;
+            st.active_sas.get(txid).cloned()
+        }?;
+        let guard = handle.lock().await;
+        Some(guard.check_status())
+    }
+    // ---- QR ----
+
+    pub async fn qr_display(
+        &self,
+        mode: crate::api::high::verification::qr::QrMode,
+        peer_user: i64,
+        peer_session: i64,
+    ) -> Result<(crate::api::high::verification::qr::QrCode, String)> {
+        let (msk_b64, ed_b64) = self.async_our_keys_and_ed().await?;
+        let (code, flow) = crate::api::high::verification::qr::QrFlow::display(
+            mode,
+            self.low.clone(),
+            self.event_tx.subscribe(),
+            peer_user,
+            peer_session,
+            msk_b64,
+            ed_b64,
+        )
+        .await?;
+        let txid = flow.transaction_id().to_string();
+        let handle = Arc::new(tokio::sync::Mutex::new(flow));
+        { let mut st = self.state.write().await; st.active_qr.insert(txid.clone(), handle); }
+        Ok((code, txid))
+    }
+
+    pub async fn qr_scan(
+        &self,
+        qr_raw: &str,
+        peer_user: i64,
+        peer_session: i64,
+    ) -> Result<String> {
+        let (msk_b64, ed_b64) = self.async_our_keys_and_ed().await?;
+        let flow = crate::api::high::verification::qr::QrFlow::scan(
+            qr_raw,
+            self.low.clone(),
+            self.event_tx.subscribe(),
+            peer_user,
+            peer_session,
+            msk_b64,
+            ed_b64,
+        )
+        .await?;
+        let txid = flow.transaction_id().to_string();
+        let handle = Arc::new(tokio::sync::Mutex::new(flow));
+        { let mut st = self.state.write().await; st.active_qr.insert(txid.clone(), handle); }
+        Ok(txid)
+    }
+
+    pub async fn qr_next(&self, txid: &str) -> Result<crate::api::high::verification::qr::QrStep> {
+        let handle = {
+            let st = self.state.read().await;
+            st.active_qr.get(txid).cloned()
+        }
+        .ok_or_else(|| LockNetError::InvalidArgument(format!("no active QR with txid {txid}")))?;
         let mut guard = handle.lock().await;
         guard.next().await
     }
 
-    pub async fn sas_confirm(&self, transaction_id: &str, accept: bool) -> Result<()> {
-        let handle = { let st = self.state.read().await; st.active_sas.get(transaction_id).cloned() }.ok_or_else(|| LockNetError::InvalidResponse("sas flow not found".into()))?;
+    pub async fn qr_exchange_mac(&self, txid: &str) -> Result<crate::api::high::verification::qr::QrStep> {
+        let handle = {
+            let st = self.state.read().await;
+            st.active_qr.get(txid).cloned()
+        }
+        .ok_or_else(|| LockNetError::InvalidArgument(format!("no active QR with txid {txid}")))?;
+
         let mut guard = handle.lock().await;
-        guard.confirm_emoji(accept).await
+        let peer_uid = guard.peer_user_id();
+        let peer_sid = guard.peer_session_id();
+        let mode = guard.mode();
+
+        let peer_key = match mode {
+            crate::api::high::verification::qr::QrMode::UserToUser => {
+                let cs = self.low.crypto().query_cross_signing_keys(vec![peer_uid]).await?;
+                cs.get(&peer_uid).map(|u| u.master_key.key.clone())
+                    .ok_or_else(|| LockNetError::InvalidArgument(format!("peer {peer_uid} msk not found")))?
+            }
+            crate::api::high::verification::qr::QrMode::SelfDeviceTrusted
+            | crate::api::high::verification::qr::QrMode::SelfDeviceUntrusted => {
+                let keys = self.low.keys().query(vec![peer_uid]).await?;
+                keys.get(&peer_uid).and_then(|m| m.get(&peer_sid))
+                    .map(|d| d.ed25519_key.clone())
+                    .ok_or_else(|| LockNetError::InvalidArgument(format!("peer {peer_uid} ed25519 not found")))?
+            }
+        };
+
+        let step = guard.exchange_mac(peer_key).await?;
+
+        if matches!(step, crate::api::high::verification::qr::QrStep::Verified) {
+            drop(guard);
+            let user_id = peer_uid;
+            let session_id = peer_sid;
+            {
+                let mut st = self.state.write().await;
+                st.verified_sessions.insert(session_id);
+                st.verified_users.insert(user_id);
+            }
+            let _ = self.event_tx.send(HighEvent::SessionVerified { user_id, session_id });
+            let _ = self.event_tx.send(HighEvent::UserVerified { user_id });
+        }
+
+        Ok(step)
     }
 
-    pub async fn sas_remove(&self, transaction_id: &str) {
-        let mut st = self.state.write().await;
-        st.active_sas.remove(transaction_id);
+    pub async fn qr_cancel(&self, txid: &str) -> Result<()> {
+        let handle = {
+            let mut st = self.state.write().await;
+            st.active_qr.remove(txid)
+        };
+        if let Some(h) = handle {
+            let mut guard = h.lock().await;
+            guard.cancel().await?;
+        }
+        Ok(())
+    }
+
+        // ---- Backup ----
+
+    pub async fn backup_export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
+        self.low.backup().export(recovery_key).await
+    }
+
+    pub async fn backup_import(
+        &self,
+        version: i32,
+        recovery_key: &RecoveryKey,
+    ) -> Result<BackupImportResult> {
+        self.low.backup().import(version, recovery_key).await
+    }
+
+    /// Генерит новый `RecoveryKey`, экспортирует всё, возвращает `(recovery_key, result)`.
+    /// Пользователь **обязан** сохранить `recovery_key` — без него восстановить нельзя.
+    pub async fn backup_export_default(&self) -> Result<(RecoveryKey, BackupExportResult)> {
+        let rk = RecoveryKey::generate();
+        let result = self.backup_export(&rk).await?;
+        Ok((rk, result))
+    }
+
+    pub async fn backup_versions(&self) -> Result<Vec<BackupVersion>> {
+        self.low.backup().versions().await
+    }
+
+    pub async fn backup_get(&self, version: i32) -> Result<BackupVersionData> {
+        self.low.backup().get(version).await
+    }
+
+    pub async fn backup_delete(&self, version: i32) -> Result<()> {
+        self.low.backup().delete(version).await
     }
 }

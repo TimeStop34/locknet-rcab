@@ -8,6 +8,7 @@ use crate::core::crypto::CryptoStore;
 pub struct LockNetLowAgent {
     user_id: i64,
     session_id: i64,
+    #[allow(dead_code)]
     cmd_tx: mpsc::Sender<Cmd>,
     event_tx: broadcast::Sender<Event>,
     store: Arc<dyn CryptoStore>,
