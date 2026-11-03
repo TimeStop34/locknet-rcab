@@ -1,6 +1,5 @@
 mod common;
 
-use locknet_rcab::LockNetError;
 
 #[tokio::test]
 async fn create_group_only_creator_is_member() {

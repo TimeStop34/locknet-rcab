@@ -66,7 +66,7 @@ async fn claim_one_time_key_returns_distinct_keys() {
     let alice = common::register_new("keys_claim_a").await;
     let bob = common::register_new("keys_claim_b").await;
 
-    let alice_low = alice.low();
+    let _alice_low = alice.low();
     let bob_low = bob.low();
     let alice_uid = alice.session.user_id;
     let alice_sid = alice.session.session_id;
@@ -103,7 +103,7 @@ async fn claim_one_time_key_session_not_found() {
     let alice = common::register_new("keys_snf_a").await;
     let bob = common::register_new("keys_snf_b").await;
 
-    let alice_low = alice.low();
+    let _alice_low = alice.low();
     let bob_low = bob.low();
     let alice_sid = alice.session.session_id;
 

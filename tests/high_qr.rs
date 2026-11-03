@@ -2,7 +2,7 @@ mod common;
 
 use std::time::Duration;
 
-use locknet_rcab::{Credentials, LockNetClient, QrMode, QrStep};
+use locknet_rcab::{QrMode, QrStep};
 
 async fn setup_cs(agent: &locknet_rcab::LockNetAgent) {
     agent.security().setup_cross_signing().await.expect("setup_cross_signing");

@@ -159,7 +159,7 @@ async fn membership_change_rotates_megolm() {
 
     let alice_agent = alice.client.get_agent().expect("alice agent");
     let bob_agent = bob.client.get_agent().expect("bob agent");
-    let alice_low = alice.low();
+    let _alice_low = alice.low();
     let bob_low = bob.low();
 
     let group_id = common::setup_group_with_two(&alice, &bob, "HS_Rot").await;

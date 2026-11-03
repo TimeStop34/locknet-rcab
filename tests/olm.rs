@@ -2,26 +2,6 @@ mod common;
 
 use locknet_rcab::Event;
 
-async fn olm_setup_warm(alice_low: &locknet_rcab::LockNetLowAgent, bob_low: &locknet_rcab::LockNetLowAgent,
-                         bob_uid: i64, bob_sid: i64) {
-    let mut rx = bob_low.subscribe();
-    alice_low
-        .olm()
-        .send(bob_uid, bob_sid, "warmup")
-        .wait()
-        .await
-        .expect("olm warmup send");
-
-    let evt = common::wait_event(&mut rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    bob_low
-        .olm()
-        .decrypt(p)
-        .wait()
-        .await
-        .expect("olm warmup decrypt");
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_send_and_receive() {
     let alice = common::register_new("olm_sr_a").await;
@@ -194,7 +174,7 @@ async fn olm_decrypt_returns_none_without_session() {
     let alice = common::register_new("olm_none_a").await;
     let bob = common::register_new("olm_none_b").await;
 
-    let alice_low = alice.low();
+    let _alice_low = alice.low();
     let bob_low = bob.low();
     let alice_sid = alice.session.session_id;
     let bob_uid = bob.session.user_id;
