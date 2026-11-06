@@ -12,6 +12,11 @@ pub enum HighEvent {
     GroupCreated { group: Group },
     GroupMembershipChanged { group_id: i64, change: MembershipChange, user: User },
     InviteReceived { invite: Invite },
+    /// Сервер уведомил об обновлении `encrypted_group_data` у группы,
+    /// в которой мы состоим. Политика (History/Megolm) могла измениться;
+    /// `agent.chat(id)` вернёт Chat с актуальным `group_data` (если сможем
+    /// расшифровать новым/старым `group_data_key`).
+    PolicyChanged { group_id: i64 },
     UserVerified { user_id: i64 },
     SessionVerified { user_id: i64, session_id: i64 },
     CrossSigningReset { user_id: i64 },

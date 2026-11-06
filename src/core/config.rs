@@ -1,5 +1,6 @@
 use std::time::Duration;
 use url::Url;
+use crate::core::policies::{HistoryVisibility, MegolmRotationVisibility};
 
 #[derive(Clone, Debug)]
 pub struct LockNetConfig {
@@ -13,6 +14,11 @@ pub struct LockNetConfig {
     pub reconnect_backoff_initial: Duration,
     pub reconnect_backoff_max: Duration,
     pub accept_invalid_certs: bool,
+
+    /// Fallback-политика, если сервер не отдал `Group.history_visibility`.
+    pub default_history_visibility: HistoryVisibility,
+    /// Fallback-политика, если сервер не отдал `Group.megolm_rotation_visibility`.
+    pub default_megolm_rotation_visibility: MegolmRotationVisibility,
 }
 
 impl LockNetConfig {
@@ -28,6 +34,8 @@ impl LockNetConfig {
             reconnect_backoff_initial: Duration::from_secs(1),
             reconnect_backoff_max: Duration::from_secs(60),
             accept_invalid_certs: true,
+            default_history_visibility: HistoryVisibility::default(),
+            default_megolm_rotation_visibility: MegolmRotationVisibility::default(),
         })
     }
 

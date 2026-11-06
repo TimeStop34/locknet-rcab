@@ -4,6 +4,7 @@ use tokio::task::JoinHandle;
 use crate::api::low::agent::LockNetLowAgent;
 use crate::api::low::event::Event as LowEvent;
 use crate::core::errors::{LockNetError, Result};
+use crate::core::policies::{HistoryVisibility, MegolmRotationVisibility};
 use super::event::HighEvent;
 use super::models::{Chat, Group, Invite, Message, Reaction, User};
 use super::security::SecurityHelper;
@@ -37,10 +38,11 @@ impl LockNetAgent {
         let low = self.low.clone();
         let state = self.state.clone();
         let event_tx = self.event_tx.clone();
+        let security = self.security.clone();
         let mut rx = low.subscribe();
         let handle = tokio::spawn(async move {
             while let Ok(evt) = rx.recv().await {
-                if let Err(e) = process_event(&low, &state, &event_tx, evt).await {
+                if let Err(e) = process_event(&low, &state, &event_tx, &security, evt).await {
                     tracing::warn!(?e, "high process error");
                 }
             }
@@ -77,18 +79,21 @@ impl LockNetAgent {
         };
         st.groups
             .values()
-            .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone()))
+            .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone(), self.security.clone()))
             .collect()
     }
 
     pub async fn refresh_chats(&self) -> Result<Vec<Chat>> {
         let groups = self.low.groups().list().await?;
-        let mut st = self.state.write().await;
         let mut out = Vec::with_capacity(groups.len());
         for dto in groups {
-            let g = st.group_to_domain(&dto);
-            st.groups.insert(g.id, g.clone());
-            out.push(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone()));
+            let g = {
+                let mut st = self.state.write().await;
+                let g = st.group_to_domain(&dto, &self.low).await;
+                st.groups.insert(g.id, g.clone());
+                g
+            };
+            out.push(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()));
         }
         Ok(out)
     }
@@ -98,25 +103,31 @@ impl LockNetAgent {
             return Ok(c);
         }
         let info = self.low.groups().info(chat_id).await?;
-        let mut st = self.state.write().await;
-        let g = st.group_to_domain(&info);
-        st.groups.insert(g.id, g.clone());
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone()))
+        let g = {
+            let mut st = self.state.write().await;
+            let g = st.group_to_domain(&info, &self.low).await;
+            st.groups.insert(g.id, g.clone());
+            g
+        };
+        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
     fn cached_chat(&self, chat_id: i64) -> Option<Chat> {
         let st = self.state.try_read().ok()?;
         st.groups
             .get(&chat_id)
-            .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone()))
+            .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
     pub async fn open_direct(&self, other_user_id: i64) -> Result<Chat> {
         let group = self.low.groups().create_direct(other_user_id).await?;
-        let mut st = self.state.write().await;
-        let g = st.group_to_domain(&group);
-        st.groups.insert(g.id, g.clone());
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone()))
+        let g = {
+            let mut st = self.state.write().await;
+            let g = st.group_to_domain(&group, &self.low).await;
+            st.groups.insert(g.id, g.clone());
+            g
+        };
+        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
     pub async fn create_group(
@@ -131,18 +142,24 @@ impl LockNetAgent {
             .groups()
             .create(name, is_public, public_id, participants)
             .await?;
-        let mut st = self.state.write().await;
-        let g = st.group_to_domain(&group);
-        st.groups.insert(g.id, g.clone());
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone()))
+        let g = {
+            let mut st = self.state.write().await;
+            let g = st.group_to_domain(&group, &self.low).await;
+            st.groups.insert(g.id, g.clone());
+            g
+        };
+        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
     pub async fn join_group(&self, public_id: impl Into<String>) -> Result<Chat> {
         let group = self.low.groups().join(public_id).await?;
-        let mut st = self.state.write().await;
-        let g = st.group_to_domain(&group);
-        st.groups.insert(g.id, g.clone());
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone()))
+        let g = {
+            let mut st = self.state.write().await;
+            let g = st.group_to_domain(&group, &self.low).await;
+            st.groups.insert(g.id, g.clone());
+            g
+        };
+        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
     pub async fn leave_chat(&self, chat_id: i64) -> Result<()> {
@@ -226,6 +243,8 @@ fn stub_group(chat_id: i64) -> Group {
         updated_at: chrono::Utc::now(),
         members: Vec::new(),
         member_count: 0,
+        encrypted_group_data: None,
+        group_data: None,
     }
 }
 
@@ -297,13 +316,45 @@ async fn respond_key_request(
         state: state.clone(),
         event_tx: event_tx.clone(),
     };
-    let trusted = security.is_session_verified(sender_user, sender_session).await;
 
-    if !trusted {
-        tracing::info!(sender_user, sender_session, "key_request denied: session not verified");
+    let mut allowed_chats = Vec::new();
+    let mut has_after_join = false;
+
+    for chat_id in &chat_ids {
+        let history_vis = low.store().group_data_state(*chat_id)
+            .map(|s| s.data.history_visibility)
+            .unwrap_or(HistoryVisibility::AfterJoin);
+
+        if history_vis == HistoryVisibility::AfterJoin {
+            has_after_join = true;
+            continue;
+        }
+
+        let allowed = match history_vis {
+            HistoryVisibility::AllVerifiedSessions => {
+                security.is_session_verified(sender_user, sender_session).await
+            }
+            HistoryVisibility::AllVerifiedUsers => {
+                security.is_session_verified(sender_user, sender_session).await
+                    && security.is_user_verified(sender_user).await
+            }
+            _ => false,
+        };
+
+        if allowed {
+            allowed_chats.push(*chat_id);
+        }
+    }
+
+    if allowed_chats.is_empty() {
+        let reason = if has_after_join {
+            "history_visibility_policy"
+        } else {
+            "not verified"
+        };
         let _ = low
             .key_sharing()
-            .send_denied(sender_user, sender_session, txid, "session not verified".into())
+            .send_denied(sender_user, sender_session, txid, reason.into())
             .await;
         return;
     }
@@ -312,7 +363,7 @@ async fn respond_key_request(
 
     let mut to_send: Vec<(i64, String, String)> = Vec::new();
     for (cid, mid) in low.store().megolm_inbound_all() {
-        if !chat_ids.contains(&cid) {
+        if !allowed_chats.contains(&cid) {
             continue;
         }
         let key = format!("{}:{}", cid, mid);
@@ -365,6 +416,7 @@ async fn process_event(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
     event_tx: &broadcast::Sender<HighEvent>,
+    security: &Arc<SecurityHelper>,
     evt: LowEvent,
 ) -> Result<()> {
     match evt {
@@ -377,9 +429,9 @@ async fn process_event(
             let chat = st
                 .groups
                 .get(&mc.chat_id)
-                .map(|g| Chat::new(low.clone(), g.clone(), state.clone(), event_tx.clone()))
+                .map(|g| Chat::new(low.clone(), g.clone(), state.clone(), event_tx.clone(), security.clone()))
                 .unwrap_or_else(|| {
-                    Chat::new(low.clone(), stub_group(mc.chat_id), state.clone(), event_tx.clone())
+                    Chat::new(low.clone(), stub_group(mc.chat_id), state.clone(), event_tx.clone(), security.clone())
                 });
             drop(st);
 
@@ -402,9 +454,9 @@ async fn process_event(
             let chat = st
                 .groups
                 .get(&u.chat_id)
-                .map(|g| Chat::new(low.clone(), g.clone(), state.clone(), event_tx.clone()))
+                .map(|g| Chat::new(low.clone(), g.clone(), state.clone(), event_tx.clone(), security.clone()))
                 .unwrap_or_else(|| {
-                    Chat::new(low.clone(), stub_group(u.chat_id), state.clone(), event_tx.clone())
+                    Chat::new(low.clone(), stub_group(u.chat_id), state.clone(), event_tx.clone(), security.clone())
                 });
             drop(st);
 
@@ -472,10 +524,12 @@ async fn process_event(
             });
         }
         LowEvent::GroupCreated(gc) => {
-            let mut st = state.write().await;
-            let g = st.group_to_domain(&gc.group);
-            st.groups.insert(g.id, g.clone());
-            drop(st);
+            let g = {
+                let mut st = state.write().await;
+                let g = st.group_to_domain(&gc.group, low).await;
+                st.groups.insert(g.id, g.clone());
+                g
+            };
             let _ = event_tx.send(HighEvent::GroupCreated { group: g });
         }
         LowEvent::GroupInviteCreated(gi) => {
@@ -493,36 +547,66 @@ async fn process_event(
                 u
             };
 
-            if let Ok(group_dto) = low.groups().info(mc.group_id).await {
-                if !group_dto.is_public {
-                    let mut participant_ids: Vec<i64> = group_dto
-                        .members
-                        .as_ref()
-                        .map(|list| list.iter().map(|m| m.user_id).collect())
-                        .unwrap_or_default();
+            // Ротация имеет смысл только если мы **участвуем** в группе —
+            // то есть знаем политику. Иначе мы свежее устройство без ключа,
+            // и создание новой policy с "creation defaults" = downgrade-атака.
+            let has_local_policy = low.store().group_data_state(mc.group_id).is_some();
 
-                    if matches!(
-                        mc.change,
-                        crate::api::low::models::MembershipChange::Left
-                    ) {
-                        participant_ids.retain(|uid| *uid != mc.user_id);
-                    }
+            if has_local_policy {
+                if let Ok(group_dto) = low.groups().info(mc.group_id).await {
+                    if !group_dto.is_public {
+                        let mut participant_ids: Vec<i64> = group_dto
+                            .members
+                            .as_ref()
+                            .map(|list| list.iter().map(|m| m.user_id).collect())
+                            .unwrap_or_default();
 
-                    if !participant_ids.is_empty() {
-                        if let Ok(info) = low.megolm().rotate(mc.group_id).await {
-                            if let Err(e) = crate::api::high::group_key::fan_out_group_key(
-                                low,
-                                mc.group_id,
-                                &participant_ids,
-                                &info,
-                            )
-                            .await
-                            {
-                                tracing::warn!(?e, "membership rotation fan-out failed");
+                        if matches!(
+                            mc.change,
+                            crate::api::low::models::MembershipChange::Left
+                        ) {
+                            participant_ids.retain(|uid| *uid != mc.user_id);
+                        }
+
+                        if !participant_ids.is_empty() {
+                            if let Ok(info) = low.megolm().rotate(mc.group_id).await {
+                                let policy = low.store().group_data_state(mc.group_id)
+                                    .map(|s| s.data.megolm_rotation_visibility)
+                                    .unwrap_or(MegolmRotationVisibility::OnlyVerifiedUsers);
+                                if let Err(e) = crate::api::high::group_key::fan_out_group_key(
+                                    low,
+                                    mc.group_id,
+                                    &participant_ids,
+                                    &info,
+                                    policy,
+                                    security,
+                                )
+                                .await
+                                {
+                                    tracing::warn!(?e, "membership rotation fan-out failed");
+                                }
+
+                                // Sync new blob to server (creator only, idempotent).
+                                if let Ok(fresh) = low.groups().info(mc.group_id).await {
+                                    if fresh.created_by == low.user_id() {
+                                        if let Some(state_gd) = low.store().group_data_state(mc.group_id) {
+                                            if fresh.encrypted_group_data.as_deref() != Some(state_gd.blob.as_str()) {
+                                                let _ = low.groups()
+                                                    .update_group_data(mc.group_id, &state_gd.blob)
+                                                    .await;
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
                 }
+            } else {
+                tracing::debug!(
+                    group_id = mc.group_id,
+                    "membership changed but no local policy — skipping rotation (need key_request)"
+                );
             }
 
             let _ = event_tx.send(HighEvent::GroupMembershipChanged {
@@ -530,6 +614,28 @@ async fn process_event(
                 change: mc.change,
                 user,
             });
+        }
+        LowEvent::GroupDataUpdated { group_id } => {
+            // Сервер уведомил, что `encrypted_group_data` обновлён (кем-то
+            // из участников — обычно создателем). Перечитываем группу:
+            // `group_to_domain` расшифрует новый blob нашим локальным
+            // `group_data_key` и применит anti-replay по version.
+            //
+            // Если не сможем расшифровать (ротация с другого устройства) —
+            // `group_data` остаётся `None`, применяются строжайшие defaults.
+            if let Ok(dto) = low.groups().info(group_id).await {
+                let g = {
+                    let mut st = state.write().await;
+                    if !st.groups.contains_key(&group_id) {
+                        // Группа не в кэше — нам неинтересно (мы её не знаем)
+                        return Ok(());
+                    }
+                    let g = st.group_to_domain(&dto, low).await;
+                    st.groups.insert(g.id, g.clone());
+                    g
+                };
+                let _ = event_tx.send(HighEvent::PolicyChanged { group_id: g.id });
+            }
         }
         LowEvent::ToDevice(payload) => {
             let sender_session = payload.sender_session_id;
@@ -676,6 +782,7 @@ async fn process_event(
         LowEvent::CrossSigningReset(r) => {
             let mut st = state.write().await;
             st.verified_users.remove(&r.user_id);
+            st.invalidate_trust_graph();
             drop(st);
             let _ = event_tx.send(HighEvent::CrossSigningReset { user_id: r.user_id });
         }
@@ -685,7 +792,10 @@ async fn process_event(
         LowEvent::SessionExpired => {
             let _ = event_tx.send(HighEvent::SessionExpired);
         }
-        LowEvent::CrossSigningSignatureAdded(_) => {}
+        LowEvent::CrossSigningSignatureAdded(_) => {
+            let mut st = state.write().await;
+            st.invalidate_trust_graph();
+        }
         LowEvent::Unknown { .. } => {}
     }
     Ok(())

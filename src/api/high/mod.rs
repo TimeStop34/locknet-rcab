@@ -4,6 +4,7 @@ pub(crate) mod group_key;
 pub mod models;
 pub mod security;
 pub(crate) mod state;
+pub mod trust;
 pub mod verification;
 
 pub use agent::LockNetAgent;

@@ -32,6 +32,8 @@ impl LockNetLowAgent {
         cmd_tx: mpsc::Sender<Cmd>,
         event_tx: broadcast::Sender<Event>,
         store: Arc<dyn CryptoStore>,
+        default_history_visibility: crate::core::policies::HistoryVisibility,
+        default_megolm_rotation_visibility: crate::core::policies::MegolmRotationVisibility,
     ) -> Self {
         let messages_helper = Arc::new(LockNetMessagesHelper { cmd_tx: cmd_tx.clone() });
         let groups_helper = Arc::new(LockNetGroupsHelper { cmd_tx: cmd_tx.clone() });
@@ -41,6 +43,8 @@ impl LockNetLowAgent {
         let olm_helper = Arc::new(LockNetOlmHelper { cmd_tx: cmd_tx.clone(), store: store.clone() });
         let megolm_helper = Arc::new(LockNetMegolmHelper {
             cmd_tx: cmd_tx.clone(), store: store.clone(), olm: olm_helper.clone(), session_id,
+            default_history_visibility,
+            default_megolm_rotation_visibility,
         });
         let backup_helper = Arc::new(LockNetBackupHelper {
             cmd_tx: cmd_tx.clone(),

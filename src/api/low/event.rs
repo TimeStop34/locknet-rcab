@@ -12,6 +12,7 @@ pub enum Event {
     GroupCreated(GroupCreated),
     GroupInviteCreated(GroupInviteCreated),
     GroupMembershipChanged(GroupMembershipChanged),
+    GroupDataUpdated { group_id: i64 },
     ToDevice(ToDevicePayload),
     CrossSigningSignatureAdded(CrossSigningSignatureAdded),
     CrossSigningReset(CrossSigningReset),
@@ -34,6 +35,10 @@ impl Event {
             "group_created" => serde_json::from_value(data).map(Event::GroupCreated).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "group_invite_created" => serde_json::from_value(data).map(Event::GroupInviteCreated).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "group_membership_changed" => serde_json::from_value(data).map(Event::GroupMembershipChanged).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
+            "group_data_updated" => {
+                let gid = data.get("group_id").and_then(|v| v.as_i64()).unwrap_or(0);
+                Event::GroupDataUpdated { group_id: gid }
+            }
             "to_device" => serde_json::from_value(data).map(Event::ToDevice).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "cross_signing_signature_added" => serde_json::from_value(data).map(Event::CrossSigningSignatureAdded).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "cross_signing_reset" => serde_json::from_value(data).map(Event::CrossSigningReset).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),

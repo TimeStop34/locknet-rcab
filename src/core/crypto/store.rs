@@ -4,6 +4,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use vodozemac::megolm::{GroupSession, InboundGroupSession};
 
+use crate::core::policies::GroupDataState;
 use super::account::Account;
 use super::olm::OlmSessionEntry;
 use super::signature::CrossSigningKeysPrivate;
@@ -28,6 +29,11 @@ pub trait CryptoStore: Send + Sync {
     fn cross_signing_keys(&self) -> Option<Arc<CrossSigningKeysPrivate>>;
     fn cross_signing_keys_put(&self, keys: Arc<CrossSigningKeysPrivate>);
     fn cross_signing_keys_clear(&self);
+
+    /// Шифрованный `GroupData` для чата. `None` = группа без политик (старый чат).
+    fn group_data_state(&self, chat_id: i64) -> Option<GroupDataState>;
+    fn group_data_state_put(&self, chat_id: i64, state: GroupDataState);
+    fn group_data_state_remove(&self, chat_id: i64);
 }
 
 pub struct InMemoryStore {
@@ -36,6 +42,7 @@ pub struct InMemoryStore {
     megolm_out: Arc<Mutex<HashMap<i64, (Arc<Mutex<GroupSession>>, String)>>>,
     megolm_in: Arc<Mutex<HashMap<(i64, String), Arc<Mutex<InboundGroupSession>>>>>,
     cross_signing: Arc<Mutex<Option<Arc<CrossSigningKeysPrivate>>>>,
+    group_data: Arc<Mutex<HashMap<i64, GroupDataState>>>,
 }
 
 impl InMemoryStore {
@@ -46,6 +53,7 @@ impl InMemoryStore {
             megolm_out: Arc::new(Mutex::new(HashMap::new())),
             megolm_in: Arc::new(Mutex::new(HashMap::new())),
             cross_signing: Arc::new(Mutex::new(None)),
+            group_data: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -99,5 +107,19 @@ impl CryptoStore for InMemoryStore {
     }
     fn cross_signing_keys_clear(&self) {
         if let Ok(mut g) = self.cross_signing.try_lock() { *g = None; }
+    }
+
+        fn group_data_state(&self, chat_id: i64) -> Option<GroupDataState> {
+        self.group_data.try_lock().ok().and_then(|g| g.get(&chat_id).cloned())
+    }
+    fn group_data_state_put(&self, chat_id: i64, state: GroupDataState) {
+        if let Ok(mut g) = self.group_data.try_lock() {
+            g.insert(chat_id, state);
+        }
+    }
+    fn group_data_state_remove(&self, chat_id: i64) {
+        if let Ok(mut g) = self.group_data.try_lock() {
+            g.remove(&chat_id);
+        }
     }
 }

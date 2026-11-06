@@ -16,16 +16,64 @@ pub struct LockNetMegolmHelper {
     pub(crate) store: Arc<dyn CryptoStore>,
     pub(crate) olm: Arc<LockNetOlmHelper>,
     pub(crate) session_id: i64,
+    pub(crate) default_history_visibility: crate::core::policies::HistoryVisibility,
+    pub(crate) default_megolm_rotation_visibility: crate::core::policies::MegolmRotationVisibility,
 }
 
 impl LockNetMegolmHelper {
     pub async fn create(&self, chat_id: i64) -> Result<MegolmSessionInfo> {
+        use crate::core::crypto::group_data::encrypt_group_data;
+        use crate::core::policies::{GroupData, GroupDataState};
+
         let (session, key) = create_outbound();
         let sid = session_id(&session);
+
+        // GroupData: первый create — v1 с дефолтными политиками.
+        // Ротация (повторный create при существующем state) — version+1,
+        // политики сохраняются, group_data_key генерируется заново
+        // (старые получатели не смогут читать новые policy-апдейты).
+        let (new_version, history_vis, megolm_vis) = match self.store.group_data_state(chat_id) {
+            Some(prev) => (
+                prev.data.version.saturating_add(1),
+                prev.data.history_visibility,
+                prev.data.megolm_rotation_visibility,
+            ),
+            None => (
+                1,
+                self.default_history_visibility,
+                self.default_megolm_rotation_visibility,
+            ),
+        };
+
+        let mut gd_key = [0u8; 32];
+        getrandom::getrandom(&mut gd_key).expect("getrandom");
+
+        let gd_data = GroupData {
+            version: new_version,
+            history_visibility: history_vis,
+            megolm_rotation_visibility: megolm_vis,
+            rotated_at: chrono::Utc::now(),
+        };
+        let gd_blob = encrypt_group_data(&gd_data, &gd_key)?;
+
+        self.store.group_data_state_put(
+            chat_id,
+            GroupDataState {
+                key: gd_key,
+                data: gd_data,
+                blob: gd_blob,
+            },
+        );
+
         self.store.megolm_outbound_put(chat_id, Arc::new(Mutex::new(session)), key.clone());
         let inbound = import_inbound(&key)?;
         self.store.megolm_inbound_put(chat_id, sid.clone(), Arc::new(Mutex::new(inbound)));
-        Ok(MegolmSessionInfo { chat_id, megolm_session_id: sid, session_key: key })
+
+        Ok(MegolmSessionInfo {
+            chat_id,
+            megolm_session_id: sid,
+            session_key: key,
+        })
     }
 
     pub async fn ensure_session(&self, chat_id: i64) -> Result<MegolmSessionInfo> {
@@ -83,26 +131,117 @@ impl LockNetMegolmHelper {
         megolm_session_id: String,
         session_key: String,
     ) -> Result<()> {
-        let content = json!({
-            "type": "ln.encryption.group_key",
-            "content": {
-                "algorithm": MEGOLM_ALGORITHM,
-                "chat_id": chat_id,
-                "megolm_session_id": megolm_session_id,
-                "session_key": session_key,
-            }
+        let mut content = json!({
+            "algorithm": MEGOLM_ALGORITHM,
+            "chat_id": chat_id,
+            "megolm_session_id": megolm_session_id,
+            "session_key": session_key,
         });
-        self.olm.send(to_user, to_session, content.to_string()).wait().await
+
+        // Прикладываем зашифрованный `GroupData` + ключ от него (если группа уже
+        // имеет политики). Получатель расшифрует blob и сохранит в свой `CryptoStore`.
+        if let Some(state) = self.store.group_data_state(chat_id) {
+            let key_b64 = {
+                use base64::Engine;
+                base64::engine::general_purpose::STANDARD_NO_PAD.encode(state.key)
+            };
+            if let Some(obj) = content.as_object_mut() {
+                obj.insert("group_data".into(), serde_json::Value::String(state.blob));
+                obj.insert("group_data_key".into(), serde_json::Value::String(key_b64));
+            }
+        }
+
+        let pt = json!({
+            "type": "ln.encryption.group_key",
+            "content": content,
+        }).to_string();
+
+        self.olm.send(to_user, to_session, pt).wait().await
     }
 
     pub async fn decrypt_group_key(&self, plaintext: &str) -> Result<bool> {
-        let val: serde_json::Value = match serde_json::from_str(plaintext) { Ok(v) => v, Err(_) => return Ok(false) };
-        if val.get("type").and_then(|v| v.as_str()) != Some("ln.encryption.group_key") { return Ok(false); }
-        let content = val.get("content").ok_or_else(|| LockNetError::InvalidResponse("no content".into()))?;
-        let chat_id = content.get("chat_id").and_then(|v| v.as_i64()).ok_or_else(|| LockNetError::InvalidResponse("no chat_id".into()))?;
-        let megolm_session_id = content.get("megolm_session_id").and_then(|v| v.as_str()).ok_or_else(|| LockNetError::InvalidResponse("no megolm_session_id".into()))?.to_string();
-        let session_key = content.get("session_key").and_then(|v| v.as_str()).ok_or_else(|| LockNetError::InvalidResponse("no session_key".into()))?.to_string();
+        use crate::core::crypto::group_data::decrypt_group_data;
+
+        let val: serde_json::Value = match serde_json::from_str(plaintext) {
+            Ok(v) => v,
+            Err(_) => return Ok(false),
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("ln.encryption.group_key") {
+            return Ok(false);
+        }
+        let content = val
+            .get("content")
+            .ok_or_else(|| LockNetError::InvalidResponse("no content".into()))?;
+        let chat_id = content
+            .get("chat_id")
+            .and_then(|v| v.as_i64())
+            .ok_or_else(|| LockNetError::InvalidResponse("no chat_id".into()))?;
+        let megolm_session_id = content
+            .get("megolm_session_id")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LockNetError::InvalidResponse("no megolm_session_id".into()))?
+            .to_string();
+        let session_key = content
+            .get("session_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| LockNetError::InvalidResponse("no session_key".into()))?
+            .to_string();
+
         self.import(chat_id, megolm_session_id, session_key).await?;
+
+        // ---- GroupData (опционально; старые сессии могут не иметь) ----
+        let gd_blob = content.get("group_data").and_then(|v| v.as_str());
+        let gd_key_b64 = content.get("group_data_key").and_then(|v| v.as_str());
+
+        if let (Some(blob), Some(key_b64)) = (gd_blob, gd_key_b64) {
+            use base64::Engine;
+            let key_bytes = base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(key_b64)
+                .or_else(|_| base64::engine::general_purpose::STANDARD.decode(key_b64))
+                .map_err(|e| {
+                    LockNetError::InvalidResponse(format!("group_data_key b64: {e}"))
+                })?;
+            if key_bytes.len() != 32 {
+                return Err(LockNetError::InvalidResponse(format!(
+                    "group_data_key must be 32 bytes, got {}",
+                    key_bytes.len()
+                )));
+            }
+            let mut key = [0u8; 32];
+            key.copy_from_slice(&key_bytes);
+
+            let data = match decrypt_group_data(blob, &key) {
+                Ok(d) => d,
+                Err(e) => {
+                    tracing::warn!(chat_id, ?e, "group_data decrypt failed, ignoring");
+                    return Ok(true); // мегелом-ключ всё равно импортирован
+                }
+            };
+
+            // Anti-replay: не даём серверу/отправителю откатить версию.
+            let existing = self.store.group_data_state(chat_id);
+            if let Some(prev) = &existing {
+                if data.version < prev.data.version {
+                    tracing::warn!(
+                        chat_id,
+                        incoming = data.version,
+                        current = prev.data.version,
+                        "group_data version downgrade detected, ignoring"
+                    );
+                    return Ok(true);
+                }
+            }
+
+            self.store.group_data_state_put(
+                chat_id,
+                crate::core::policies::GroupDataState {
+                    key,
+                    data,
+                    blob: blob.to_string(),
+                },
+            );
+        }
+
         Ok(true)
     }
 }

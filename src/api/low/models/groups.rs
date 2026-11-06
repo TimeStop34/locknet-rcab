@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GroupMemberInfo { pub user_id: i64, pub is_mod: bool }
 
+// убрать импорт crate::core::policies в шапке
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Group {
     pub id: i64,
@@ -15,6 +17,12 @@ pub struct Group {
     pub updated_at: DateTime<Utc>,
     pub members: Option<Vec<GroupMemberInfo>>,
     pub member_count: usize,
+
+    /// Opaque blob. Расшифровывается только клиентом (у которого есть
+    /// `group_data_key` из `ln.encryption.group_key`). Сервер не может
+    /// ни прочитать, ни валидно подменить содержимое.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub encrypted_group_data: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

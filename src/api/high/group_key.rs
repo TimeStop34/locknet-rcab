@@ -3,6 +3,8 @@ use std::sync::Arc;
 use crate::api::low::agent::LockNetLowAgent;
 use crate::api::low::helpers::megolm::MegolmSessionInfo;
 use crate::core::errors::Result;
+use crate::core::policies::MegolmRotationVisibility;
+use super::security::SecurityHelper;
 
 /// Раздаёт `ln.encryption.group_key` для `chat_id` всем сессиям всех
 /// участников (кроме нашей текущей сессии — у нас уже есть inbound).
@@ -12,6 +14,8 @@ pub(crate) async fn fan_out_group_key(
     chat_id: i64,
     participant_ids: &[i64],
     info: &MegolmSessionInfo,
+    policy: MegolmRotationVisibility,
+    security: &SecurityHelper,
 ) -> Result<usize> {
     if participant_ids.is_empty() {
         return Ok(0);
@@ -24,13 +28,29 @@ pub(crate) async fn fan_out_group_key(
 
     let mut shared = 0usize;
     for uid in participant_ids {
+        // User-level gate (для OnlyVerifiedUsers)
+        if policy == MegolmRotationVisibility::OnlyVerifiedUsers
+            && !security.is_user_verified(*uid).await
+        {
+            continue;
+        }
+
         let Some(sessions) = all_sessions.get(uid) else {
             continue;
         };
+
         for sid in sessions.keys() {
             if *uid == our_uid && *sid == our_sid {
                 continue;
             }
+
+            // Session-level gate (для OnlyVerifiedSessions и OnlyVerifiedUsers)
+            if policy != MegolmRotationVisibility::AllMembers
+                && !security.is_session_verified(*uid, *sid).await
+            {
+                continue;
+            }
+
             low.megolm()
                 .share_group_key_with_session_key(
                     chat_id,

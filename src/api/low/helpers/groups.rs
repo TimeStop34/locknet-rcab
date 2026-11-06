@@ -49,4 +49,10 @@ impl LockNetGroupsHelper {
     pub async fn decline_invite(&self, invite_id: i64) -> Result<()> {
         dispatch_unit(&self.cmd_tx, json!({ "type": "decline_invite", "data": { "invite_id": invite_id } })).await
     }
+    pub async fn update_group_data(&self, group_id: i64, encrypted_group_data: impl Into<String>) -> Result<()> {
+        dispatch_unit(&self.cmd_tx, json!({
+            "type": "update_group_data",
+            "data": { "group_id": group_id, "encrypted_group_data": encrypted_group_data.into() }
+        })).await
+    }
 }

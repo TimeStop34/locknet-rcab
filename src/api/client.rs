@@ -66,14 +66,6 @@ impl LockNetClient {
 
     pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> { self.low_agent.clone() }
 
-    /// Возвращает agent, создавая его **лениво** при первом вызове.
-    ///
-    /// Это важно: agent подписывается на `low.event_tx` и дешифрует `to_device`
-    /// через Olm. Если agent создан, но пользователь работает только с low-API
-    /// (`low.olm().decrypt()`), возникает race за stateful Olm-сессию.
-    ///
-    /// Поэтому: **не** создаём agent до тех пор, пока пользователь явно не
-    /// запросил high-API. Low-only потребители живут без agent.
     pub fn get_agent(&self) -> Option<Arc<LockNetAgent>> {
         let low = self.low_agent.as_ref()?;
         let agent = self
@@ -153,6 +145,8 @@ impl LockNetClient {
             cmd_tx.clone(),
             self.event_tx.clone(),
             self.store.clone(),
+            self.config.default_history_visibility,
+            self.config.default_megolm_rotation_visibility,
         ));
 
         if is_fresh {
@@ -186,8 +180,6 @@ impl LockNetClient {
             let _ = low_agent.events().sync_until_empty(100).await;
         }
 
-        // high_agent создаётся лениво в get_agent() — не создаём здесь.
-
         self.runner = Some(RunnerHandle { shutdown: cmd_tx, join });
         self.low_agent = Some(low_agent);
 
@@ -195,7 +187,6 @@ impl LockNetClient {
     }
 
     pub async fn disconnect(&mut self) -> Result<()> {
-        // Сначала останавливаем agent (он держит подписку на low.event_tx).
         if let Some(high) = self.high_agent.take() {
             high.shutdown().await;
         }

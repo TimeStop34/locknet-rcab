@@ -11,6 +11,7 @@ use super::message::Message;
 use super::reaction::Reaction;
 use super::user::User;
 use crate::api::high::event::HighEvent;
+use crate::api::high::security::SecurityHelper;
 use crate::api::high::state::ClientState;
 
 pub(crate) const PLAINTEXT_ALGORITHM: &str = "ln.plaintext.v1";
@@ -22,6 +23,7 @@ pub(crate) struct ChatInner {
     pub(crate) group: Group,
     pub(crate) state: Arc<RwLock<ClientState>>,
     pub(crate) high_event_tx: broadcast::Sender<HighEvent>,
+    pub(crate) security: Arc<SecurityHelper>,
     pub(crate) coverage: RwLock<Option<(String, usize)>>,
 }
 
@@ -34,6 +36,7 @@ impl Chat {
         group: Group,
         state: Arc<RwLock<ClientState>>,
         high_event_tx: broadcast::Sender<HighEvent>,
+        security: Arc<SecurityHelper>,
     ) -> Self {
         Self {
             inner: Arc::new(ChatInner {
@@ -41,6 +44,7 @@ impl Chat {
                 group,
                 state,
                 high_event_tx,
+                security,
                 coverage: RwLock::new(None),
             }),
         }
@@ -62,13 +66,108 @@ impl Chat {
         self.inner.low.groups().info(self.id()).await
     }
 
+    /// Защита от downgrade-атаки.
+    ///
+    /// Перед шифрованием мы должны **знать** политику группы. Если локального
+    /// `group_data_state` нет, различаем два случая:
+    ///
+    /// 1. **Создание** — мы создатель, сервер ещё не имеет `encrypted_group_data`.
+    ///    Можно создать новую политику с "creation defaults".
+    /// 2. **Recovery** — либо мы не создатель, либо сервер уже имеет blob.
+    ///    Нельзя создавать новую политику — это подменит строгую на мягкую
+    ///    (сервер мог специально скрыть blob). Нужно вызвать
+    ///    `request_missing_keys()` / дождаться `group_key` от другого устройства.
+    async fn ensure_policy_known(&self) -> Result<()> {
+        if !self.is_encrypted() {
+            return Ok(());
+        }
+
+        if self.inner.low.store().group_data_state(self.id()).is_some() {
+            return Ok(());
+        }
+
+        let is_creator = self.inner.group.created_by == self.inner.low.user_id();
+        if !is_creator {
+            return Err(LockNetError::InvalidArgument(
+                "cannot send: group policy unknown (no local group_data, not creator). \
+                 Call request_missing_keys() first."
+                    .into(),
+            ));
+        }
+
+        // Создатель без локального state — проверяем сервер.
+        // Если blob есть — мы были в группе раньше, потеряли store.
+        if let Ok(fresh) = self.inner.low.groups().info(self.id()).await {
+            if fresh.encrypted_group_data.is_some() {
+                return Err(LockNetError::InvalidArgument(
+                    "cannot send: server has group policy blob but local key missing. \
+                     Call request_missing_keys() to recover."
+                        .into(),
+                ));
+            }
+        }
+
+        Ok(())
+    }
+
+        /// Синхронизирует локальную policy в сервер, если мы создатель
+    /// и блоб расходится. Идемпотентно.
+    ///
+    /// Вызывается после `megolm.ensure_session` (в send) и после ротации
+    /// в `process_event` (через `LockNetAgent::sync_policy_for_chat`).
+    pub(crate) async fn sync_policy_to_server(&self) -> Result<()> {
+        if !self.is_encrypted() {
+            return Ok(());
+        }
+        let low = &self.inner.low;
+        let chat_id = self.id();
+
+        // Только создатель может писать
+        if self.inner.group.created_by != low.user_id() {
+            return Ok(());
+        }
+
+        let Some(state) = low.store().group_data_state(chat_id) else {
+            return Ok(());
+        };
+
+        // Сравниваем с тем, что сервер знает (актуальный snapshot в state.groups)
+        let server_blob = {
+            let st = self.inner.state.read().await;
+            st.groups
+                .get(&chat_id)
+                .and_then(|g| g.encrypted_group_data.clone())
+        };
+
+        if server_blob.as_deref() == Some(state.blob.as_str()) {
+            return Ok(());
+        }
+
+        low.groups().update_group_data(chat_id, &state.blob).await?;
+
+        // Обновляем snapshot в state.groups, чтобы следующий вызов не дёргал сеть
+        {
+            let mut st = self.inner.state.write().await;
+            if let Some(g) = st.groups.get_mut(&chat_id) {
+                g.encrypted_group_data = Some(state.blob);
+            }
+        }
+        Ok(())
+    }
+
     pub async fn send(&self, text: impl Into<String>) -> Result<Message> {
         let text = text.into();
         let chat_id = self.id();
         let low = self.inner.low.clone();
 
         let encrypted = if self.is_encrypted() {
+            self.ensure_policy_known().await?;
+
             let info = low.megolm().ensure_session(chat_id).await?;
+
+            // Гарантируем, что сервер знает нашу policy (для anti-downgrade
+            // проверки при восстановлении на другом устройстве).
+            self.sync_policy_to_server().await?;
 
             let need_fanout = {
                 let guard = self.inner.coverage.read().await;
@@ -100,11 +199,18 @@ impl Chat {
                         ),
                     };
                 if !participant_ids.is_empty() {
+                    let policy = low
+                        .store()
+                        .group_data_state(chat_id)
+                        .map(|s| s.data.megolm_rotation_visibility)
+                        .unwrap_or(crate::core::policies::MegolmRotationVisibility::OnlyVerifiedUsers);
                     crate::api::high::group_key::fan_out_group_key(
                         &low,
                         chat_id,
                         &participant_ids,
                         &info,
+                        policy,
+                        &self.inner.security,
                     )
                     .await?;
                 }
@@ -216,12 +322,6 @@ impl Chat {
         Ok(result)
     }
 
-    /// Возвращает `(pending_count, imported)` — сколько сообщений ждут ключа
-    /// и сколько ключей удалось импортировать после запроса.
-    ///
-    /// Использует `HighEvent::KeyRequest{Imported,Done,Denied}` —
-    /// дешифрацией `to_device` занимается только `LockNetAgent`,
-    /// гонки за stateful Olm-сессию нет.
     pub async fn request_missing_keys(&self) -> Result<(usize, u32)> {
         let chat_id = self.id();
         let low = self.inner.low.clone();
@@ -265,7 +365,6 @@ impl Chat {
         let mut any_done = false;
 
         for (target_uid, target_sid) in candidates {
-            // Подписка ДО отправки — чтобы не пропустить события
             let mut high_rx = self.inner.high_event_tx.subscribe();
 
             let txid = match low
@@ -349,6 +448,7 @@ impl Chat {
         let low = self.inner.low.clone();
         let new_text = new_text.into();
         let encrypted = if self.is_encrypted() {
+            self.ensure_policy_known().await?;
             low.megolm().ensure_session(chat_id).await?;
             low.megolm().encrypt(chat_id, &new_text).await?
         } else {
