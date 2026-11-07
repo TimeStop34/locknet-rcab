@@ -28,11 +28,14 @@ impl Account {
     pub fn mark_keys_as_published(&mut self) {
         self.inner.mark_keys_as_published();
     }
-    pub(crate) fn inner(&self) -> &OlmAccount {
+    pub fn inner(&self) -> &OlmAccount {
         &self.inner
     }
-    pub(crate) fn inner_mut(&mut self) -> &mut OlmAccount {
+    pub fn inner_mut(&mut self) -> &mut OlmAccount {
         &mut self.inner
+    }
+    pub fn from_inner(inner: OlmAccount) -> Self {
+        Self { inner }
     }
 }
 

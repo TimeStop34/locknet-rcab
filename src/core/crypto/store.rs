@@ -10,7 +10,7 @@ use super::account::Account;
 use super::olm::OlmSessionEntry;
 use super::signature::CrossSigningKeysPrivate;
 
-const MAX_OLM_SESSIONS_PER_PEER: usize = 5;
+pub(crate) const MAX_OLM_SESSIONS_PER_PEER: usize = 5;
 
 /// Хранилище криптографического состояния клиента.
 ///
@@ -73,6 +73,30 @@ pub trait CryptoStore: Send + Sync {
     async fn group_data_state(&self, chat_id: i64) -> Option<GroupDataState>;
     async fn group_data_state_put(&self, chat_id: i64, state: GroupDataState);
     async fn group_data_state_remove(&self, chat_id: i64);
+
+    /// Persist any mutations made to the `Account` returned by `account()`.
+    ///
+    /// `InMemoryStore` — no-op (всё и так в памяти до завершения процесса).
+    /// `SqliteStore` — пишет pickle в БД.
+    ///
+    /// Вызывающий **должен** звать это после мутаций `Account`
+    /// (например, после `generate_one_time_keys`, `mark_keys_as_published`,
+    /// `create_inbound_session`), если хочет, чтобы они пережили рестарт.
+    async fn save_account(&self) {}
+
+        /// Persist the **current state** of all Olm sessions for a peer.
+    ///
+    /// Olm session state mutates on every `encrypt`/`decrypt` (ratchet
+    /// advance, `has_received_message` flag). Because `olm_sessions()`
+    /// returns *clones* (in `SqliteStore` — freshly deserialized from pickle,
+    /// in `InMemoryStore` — shared `Arc`s), mutations are **not** automatically
+    /// persisted to the backing store.
+    ///
+    /// Call this after any mutation.
+    ///
+    /// - `InMemoryStore`: no-op (Arc'и в map, мутации уже видны).
+    /// - `SqliteStore`: delete-by-peer + insert-all-current-pickle.
+    async fn olm_persist(&self, peer_session_id: i64, entries: &[OlmSessionEntry]);
 }
 
 pub struct InMemoryStore {
@@ -204,5 +228,9 @@ impl CryptoStore for InMemoryStore {
 
     async fn group_data_state_remove(&self, chat_id: i64) {
         self.group_data.lock().await.remove(&chat_id);
+    }
+
+    async fn olm_persist(&self, _peer_session_id: i64, _entries: &[OlmSessionEntry]) {
+        // no-op: InMemoryStore хранит те же Arc в map, мутации уже видны.
     }
 }

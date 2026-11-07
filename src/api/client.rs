@@ -162,6 +162,8 @@ impl LockNetClient {
                     signatures: std::collections::HashMap::new(),
                 };
                 acc.mark_keys_as_published();
+                drop(acc);
+                self.store.save_account().await;
                 keys
             };
 
