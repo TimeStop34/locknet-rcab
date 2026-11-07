@@ -161,6 +161,17 @@ impl ClientState {
         self.pending_decrypt.remove(&chat_id);
     }
 
+    /// Оставляет в pending только те `message_id`, для которых `keep(mid) == true`.
+    /// Если список опустел — удаляет запись `chat_id` целиком.
+    pub fn retain_pending_decrypt<F: Fn(i64) -> bool>(&mut self, chat_id: i64, keep: F) {
+        if let Some(list) = self.pending_decrypt.get_mut(&chat_id) {
+            list.retain(|mid| keep(*mid));
+            if list.is_empty() {
+                self.pending_decrypt.remove(&chat_id);
+            }
+        }
+    }
+
     #[allow(dead_code)]
     pub fn chat_created_by(&self, chat_id: i64) -> Option<i64> {
         self.groups.get(&chat_id).map(|g| g.created_by)

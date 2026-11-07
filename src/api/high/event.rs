@@ -23,6 +23,10 @@ pub enum HighEvent {
     SasMessage { sender_user: i64, sender_session: i64, content: serde_json::Value },
     QrMessage { sender_user: i64, sender_session: i64, content: serde_json::Value },
     KeyImported { chat_id: i64, megolm_session_id: String },
+    /// Сработал key-request (или group_key пришёл через Olm), и одно
+    /// из отложенных сообщений теперь расшифровывается. `state.messages`
+    /// уже обновлён — этот event нужен только для UI-нотификации.
+    MessageDecrypted { chat_id: i64, message_id: i64, text: String },
     KeyRequestReceived { from_user: i64, from_session: i64, chat_ids: Vec<i64> },
     /// Emitted by agent when a `ln.encryption.group_key` arrived and was imported
     /// successfully, and the message carried a `transaction_id` (i.e. it's a

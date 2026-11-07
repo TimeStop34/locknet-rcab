@@ -412,6 +412,72 @@ async fn respond_key_request(
     }
 }
 
+/// Пытается расшифровать все `pending_decrypt[chat_id]` сообщения
+/// актуальными megolm-inbound ключами. Обновляет `state.messages[*].text`,
+/// убирает успешные из pending и эмитит `HighEvent::MessageDecrypted`
+/// для каждого.
+///
+/// Вызывается после успешного импорта нового megolm-ключа
+/// (`ln.encryption.group_key` в `process_event`).
+async fn try_decrypt_pending(
+    low: &Arc<LockNetLowAgent>,
+    state: &Arc<RwLock<ClientState>>,
+    event_tx: &broadcast::Sender<HighEvent>,
+    chat_id: i64,
+) {
+    // 1. Снять копию (message_id, encrypted) из state.
+    let pending: Vec<(i64, crate::api::low::models::Encrypted)> = {
+        let st = state.read().await;
+        st.pending_decrypt_for(chat_id)
+            .into_iter()
+            .filter_map(|mid| {
+                st.messages
+                    .get(&mid)
+                    .and_then(|m| m.encrypted_payload.clone())
+                    .map(|enc| (mid, enc))
+            })
+            .collect()
+    };
+
+    if pending.is_empty() {
+        return;
+    }
+
+    // 2. Пробуем decrypt по каждому.
+    let mut decrypted: Vec<(i64, String)> = Vec::new();
+    for (mid, enc) in pending {
+        if let Ok(Some(text)) = low.megolm().decrypt(chat_id, &enc).await {
+            decrypted.push((mid, text));
+        }
+    }
+
+    if decrypted.is_empty() {
+        return;
+    }
+
+    // 3. Обновляем state + чистим pending только для успешных.
+    {
+        let mut st = state.write().await;
+        for (mid, text) in &decrypted {
+            if let Some(m) = st.messages.get_mut(mid) {
+                m.text = Some(text.clone());
+            }
+        }
+        let decrypted_ids: std::collections::HashSet<i64> =
+            decrypted.iter().map(|(id, _)| *id).collect();
+        st.retain_pending_decrypt(chat_id, |mid| !decrypted_ids.contains(&mid));
+    }
+
+    // 4. Эмитим MessageDecrypted.
+    for (mid, text) in decrypted {
+        let _ = event_tx.send(HighEvent::MessageDecrypted {
+            chat_id,
+            message_id: mid,
+            text,
+        });
+    }
+}
+
 async fn process_event(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
@@ -668,6 +734,8 @@ async fn process_event(
                                             megolm_session_id: mid,
                                         });
                                     }
+                                    // Новый ключ — попробовать расшифровать pending
+                                    try_decrypt_pending(low, state, event_tx, cid).await;
                                 }
                             }
                         }
