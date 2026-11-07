@@ -24,7 +24,6 @@ async fn olm_send_and_receive() {
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
     let Event::ToDevice(payload) = evt else { unreachable!() };
 
-    // Сервер должен перезаписать sender_key/sender_session_id
     assert_eq!(payload.sender_session_id, alice.session.session_id);
     assert_eq!(payload.algorithm, "ln.encryption.olm.v1");
 
@@ -58,7 +57,6 @@ async fn olm_bidirectional() {
     let mut alice_rx = alice_low.subscribe();
     let mut bob_rx = bob_low.subscribe();
 
-    // Alice → Bob
     alice_low
         .olm()
         .send(bob_uid, bob_sid, "hi bob")
@@ -71,7 +69,6 @@ async fn olm_bidirectional() {
     let pt = bob_low.olm().decrypt(p).wait().await.expect("bob decrypt").unwrap();
     assert_eq!(pt, "hi bob");
 
-    // Bob → Alice (должна использоваться установленная inbound-сессия)
     bob_low
         .olm()
         .send(alice_uid, alice_sid, "hi alice")
@@ -105,7 +102,6 @@ async fn olm_second_message_is_normal_type() {
     let mut alice_rx = alice_low.subscribe();
     let mut bob_rx = bob_low.subscribe();
 
-    // 1. Alice → Bob: "first" (prekey, type=0)
     alice_low
         .olm()
         .send(bob_uid, bob_sid, "first")
@@ -116,9 +112,8 @@ async fn olm_second_message_is_normal_type() {
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
     let Event::ToDevice(p1) = evt else { unreachable!() };
 
-    // Проверяем, что первое сообщение действительно prekey (type=0)
     let bob_curve = {
-        let acc = bob_low.store().account();
+        let acc = bob_low.store().account().await;
         let a = acc.lock().await;
         a.curve25519_public_b64()
     };
@@ -128,7 +123,6 @@ async fn olm_second_message_is_normal_type() {
     let pt1 = bob_low.olm().decrypt(p1).wait().await.expect("decrypt #1").unwrap();
     assert_eq!(pt1, "first");
 
-    // 2. Bob → Alice: "ack" (устанавливает сессию на обеих сторонах)
     bob_low
         .olm()
         .send(alice_uid, alice_sid, "ack")
@@ -141,7 +135,6 @@ async fn olm_second_message_is_normal_type() {
     let pta = alice_low.olm().decrypt(pa).wait().await.expect("decrypt ack").unwrap();
     assert_eq!(pta, "ack");
 
-    // 3. Alice → Bob: "second" — должен быть type=1 (normal), не prekey
     alice_low
         .olm()
         .send(bob_uid, bob_sid, "second")
@@ -169,8 +162,6 @@ async fn olm_second_message_is_normal_type() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_decrypt_returns_none_without_session() {
-    // Сценарий: Bob получает type=1 (normal) сообщение от Alice, но не имеет сессии —
-    // не prekey → decrypt_impl вернёт Ok(None)
     let alice = common::register_new("olm_none_a").await;
     let bob = common::register_new("olm_none_b").await;
 
@@ -180,20 +171,18 @@ async fn olm_decrypt_returns_none_without_session() {
     let bob_uid = bob.session.user_id;
 
     let bob_curve = {
-        let acc = bob_low.store().account();
+        let acc = bob_low.store().account().await;
         let a = acc.lock().await;
         a.curve25519_public_b64()
     };
     let _ = bob_uid;
 
-    // Формируем "фейковое" normal-сообщение: type=1, тело — невалидный base64-olmsgs
-    // но decrypt_impl сначала ищет сессии, не находит, а затем для type!=0 → None
     let mut ciphertext = std::collections::HashMap::new();
     ciphertext.insert(
         bob_curve,
         locknet_rcab::models::ToDeviceCiphertext {
             ciphertext_type: 1,
-            body: "AAAA".to_string(), // мусор — но не prekey, значит не парсится в prekey
+            body: "AAAA".to_string(),
         },
     );
     let payload = locknet_rcab::models::ToDevicePayload {
@@ -217,7 +206,7 @@ async fn olm_decrypt_wrong_algorithm_fails() {
     let bob = common::register_new("olm_alg_b").await;
     let bob_low = bob.low();
     let bob_curve = {
-        let acc = bob_low.store().account();
+        let acc = bob_low.store().account().await;
         let a = acc.lock().await;
         a.curve25519_public_b64()
     };

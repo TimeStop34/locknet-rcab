@@ -95,7 +95,7 @@ impl SecurityHelper {
     }
 
     pub async fn setup_cross_signing(&self) -> Result<()> {
-        if self.low.store().cross_signing_keys().is_some() { return Err(LockNetError::AlreadyConnected); }
+        if self.low.store().cross_signing_keys().await.is_some() { return Err(LockNetError::AlreadyConnected); }
         let keys = CrossSigningKeysPrivate::generate();
         let user_id = self.low.user_id();
         let msk_pub = keys.msk_pub_b64();
@@ -117,18 +117,18 @@ impl SecurityHelper {
             user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
         };
         self.low.crypto().upload_cross_signing_keys(payload).await?;
-        let ed_b64 = { let account = self.low.store().account(); let acc = account.lock().await; acc.ed25519_public_b64() };
+        let ed_b64 = { let account = self.low.store().account().await; let acc = account.lock().await; acc.ed25519_public_b64() };
         let device_sig = sign_b64(&keys.ssk, &ed_b64)?;
         let mut device_sigs = std::collections::HashMap::new();
         device_sigs.insert(self.low.session_id(), device_sig);
         self.low.crypto().upload_signatures(Signatures { user_signatures: std::collections::HashMap::new(), device_signatures: device_sigs }).await?;
-        self.low.store().cross_signing_keys_put(Arc::new(keys));
+        self.low.store().cross_signing_keys_put(Arc::new(keys)).await;
         Ok(())
     }
 
     pub async fn reset_cross_signing(&self, password: impl Into<String>) -> Result<()> {
         self.low.crypto().reset_cross_signing_keys(password).await?;
-        self.low.store().cross_signing_keys_clear();
+        self.low.store().cross_signing_keys_clear().await;
         let mut state = self.state.write().await;
         state.verified_users.clear();
         state.verified_sessions.clear();
@@ -139,11 +139,11 @@ impl SecurityHelper {
     // ---- SAS ----
 
     async fn async_our_keys_and_ed(&self) -> Result<(String, String)> {
-        let keys = self.low.store().cross_signing_keys()
+        let keys = self.low.store().cross_signing_keys().await
             .ok_or_else(|| LockNetError::InvalidResponse("setup_cross_signing required".into()))?;
         let msk_b64 = keys.msk_pub_b64();
         let ed_b64 = {
-            let account = self.low.store().account();
+            let account = self.low.store().account().await;
             let acc = account.lock().await;
             acc.ed25519_public_b64()
         };

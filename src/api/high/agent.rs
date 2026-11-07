@@ -321,7 +321,7 @@ async fn respond_key_request(
     let mut has_after_join = false;
 
     for chat_id in &chat_ids {
-        let history_vis = low.store().group_data_state(*chat_id)
+        let history_vis = low.store().group_data_state(*chat_id).await
             .map(|s| s.data.history_visibility)
             .unwrap_or(HistoryVisibility::AfterJoin);
 
@@ -362,7 +362,7 @@ async fn respond_key_request(
     let have_set: std::collections::HashSet<String> = have.into_iter().collect();
 
     let mut to_send: Vec<(i64, String, String)> = Vec::new();
-    for (cid, mid) in low.store().megolm_inbound_all() {
+    for (cid, mid) in low.store().megolm_inbound_all().await {
         if !allowed_chats.contains(&cid) {
             continue;
         }
@@ -370,7 +370,7 @@ async fn respond_key_request(
         if have_set.contains(&key) {
             continue;
         }
-        if let Some(session) = low.store().megolm_inbound(cid, &mid) {
+        if let Some(session) = low.store().megolm_inbound(cid, &mid).await {
             let mut s = session.lock().await;
             let first = s.first_known_index();
             if let Some(exported) = s.export_at(first) {
@@ -550,7 +550,7 @@ async fn process_event(
             // Ротация имеет смысл только если мы **участвуем** в группе —
             // то есть знаем политику. Иначе мы свежее устройство без ключа,
             // и создание новой policy с "creation defaults" = downgrade-атака.
-            let has_local_policy = low.store().group_data_state(mc.group_id).is_some();
+            let has_local_policy = low.store().group_data_state(mc.group_id).await.is_some();
 
             if has_local_policy {
                 if let Ok(group_dto) = low.groups().info(mc.group_id).await {
@@ -570,7 +570,7 @@ async fn process_event(
 
                         if !participant_ids.is_empty() {
                             if let Ok(info) = low.megolm().rotate(mc.group_id).await {
-                                let policy = low.store().group_data_state(mc.group_id)
+                                let policy = low.store().group_data_state(mc.group_id).await
                                     .map(|s| s.data.megolm_rotation_visibility)
                                     .unwrap_or(MegolmRotationVisibility::OnlyVerifiedUsers);
                                 if let Err(e) = crate::api::high::group_key::fan_out_group_key(
@@ -589,7 +589,7 @@ async fn process_event(
                                 // Sync new blob to server (creator only, idempotent).
                                 if let Ok(fresh) = low.groups().info(mc.group_id).await {
                                     if fresh.created_by == low.user_id() {
-                                        if let Some(state_gd) = low.store().group_data_state(mc.group_id) {
+                                        if let Some(state_gd) = low.store().group_data_state(mc.group_id).await {
                                             if fresh.encrypted_group_data.as_deref() != Some(state_gd.blob.as_str()) {
                                                 let _ = low.groups()
                                                     .update_group_data(mc.group_id, &state_gd.blob)

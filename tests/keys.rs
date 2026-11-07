@@ -1,205 +1,240 @@
 mod common;
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn query_keys_returns_own_session() {
-    let alice = common::register_new("keys_q_a").await;
-    let bob = common::register_new("keys_q_b").await;
+use std::collections::HashMap;
+use std::time::Duration;
 
-    let alice_low = alice.low();
-    let bob_low = bob.low();
+use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
+use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
+use locknet_rcab::{Credentials, LockNetClient, LockNetLowAgent};
 
-    // Считываем identity keys из локального Account
-    let (own_curve, own_ed) = {
-        let acc = alice_low.store().account();
-        let a = acc.lock().await;
-        (a.curve25519_public_b64(), a.ed25519_public_b64())
-    };
+// ---- helpers ----
 
-    let result = bob_low
-        .keys()
-        .query(vec![alice.session.user_id])
-        .await
-        .expect("query_keys");
+fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
+    let msk_pub = keys.msk_pub_b64();
+    let ssk_pub = keys.ssk_pub_b64();
+    let usk_pub = keys.usk_pub_b64();
+    let ssk_sig = sign_b64(&keys.msk, &ssk_pub).expect("ssk sig");
+    let usk_sig = sign_b64(&keys.msk, &usk_pub).expect("usk sig");
 
-    let sessions = result
-        .get(&alice.session.user_id)
-        .expect("alice's session map present");
-    assert!(
-        sessions.contains_key(&alice.session.session_id),
-        "expected session {} in query_keys, got {:?}",
-        alice.session.session_id,
-        sessions.keys().collect::<Vec<_>>()
-    );
+    let mut ssk_inner = HashMap::new();
+    ssk_inner.insert("master".to_string(), ssk_sig);
+    let mut ssk_sigs = HashMap::new();
+    ssk_sigs.insert(user_id.to_string(), ssk_inner);
 
-    let dev = &sessions[&alice.session.session_id];
-    assert_eq!(dev.curve25519_key, own_curve);
-    assert_eq!(dev.ed25519_key, own_ed);
+    let mut usk_inner = HashMap::new();
+    usk_inner.insert("master".to_string(), usk_sig);
+    let mut usk_sigs = HashMap::new();
+    usk_sigs.insert(user_id.to_string(), usk_inner);
 
-    let mut a = alice;
-    let mut b = bob;
-    a.client.disconnect().await.ok();
-    b.client.disconnect().await.ok();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn query_keys_unknown_user_returns_no_entry() {
-    let bob = common::register_new("keys_unk_b").await;
-    let bob_low = bob.low();
-
-    let result = bob_low
-        .keys()
-        .query(vec![999_999_999_999])
-        .await
-        .expect("query_keys");
-
-    assert!(
-        !result.contains_key(&999_999_999_999),
-        "unknown user should not appear in query_keys result"
-    );
-
-    let mut b = bob;
-    b.client.disconnect().await.ok();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claim_one_time_key_returns_distinct_keys() {
-    let alice = common::register_new("keys_claim_a").await;
-    let bob = common::register_new("keys_claim_b").await;
-
-    let _alice_low = alice.low();
-    let bob_low = bob.low();
-    let alice_uid = alice.session.user_id;
-    let alice_sid = alice.session.session_id;
-
-    let otk1 = bob_low
-        .keys()
-        .claim_one_time_key(alice_uid, alice_sid, None)
-        .await
-        .expect("claim #1");
-    assert!(!otk1.key_id.is_empty());
-    assert!(!otk1.key.is_empty());
-    assert!(
-        otk1.key_id.starts_with("curve25519:"),
-        "expected curve25519 key_id, got {}",
-        otk1.key_id
-    );
-
-    let otk2 = bob_low
-        .keys()
-        .claim_one_time_key(alice_uid, alice_sid, None)
-        .await
-        .expect("claim #2");
-    assert_ne!(otk1.key_id, otk2.key_id, "each claim consumes distinct OTK");
-    assert_ne!(otk1.key, otk2.key);
-
-    let mut a = alice;
-    let mut b = bob;
-    a.client.disconnect().await.ok();
-    b.client.disconnect().await.ok();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claim_one_time_key_session_not_found() {
-    let alice = common::register_new("keys_snf_a").await;
-    let bob = common::register_new("keys_snf_b").await;
-
-    let _alice_low = alice.low();
-    let bob_low = bob.low();
-    let alice_sid = alice.session.session_id;
-
-    // Неверный user_id для этой сессии → session_not_found
-    let err = bob_low
-        .keys()
-        .claim_one_time_key(alice.session.user_id + 1, alice_sid, None)
-        .await
-        .unwrap_err();
-    common::assert_server_code(err, "session_not_found");
-
-    // Несуществующий session_id → session_not_found
-    let err = bob_low
-        .keys()
-        .claim_one_time_key(alice.session.user_id, 999_999_999_999, None)
-        .await
-        .unwrap_err();
-    common::assert_server_code(err, "session_not_found");
-
-    let mut a = alice;
-    let mut b = bob;
-    a.client.disconnect().await.ok();
-    b.client.disconnect().await.ok();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claim_one_time_key_exhausts_after_50() {
-    let alice = common::register_new("keys_empty_a").await;
-    let bob = common::register_new("keys_empty_b").await;
-
-    let bob_low = bob.low();
-    let alice_uid = alice.session.user_id;
-    let alice_sid = alice.session.session_id;
-
-    // client.rs при register вызывает upload_keys с generate_one_time_keys(50)
-    // → на сервере ровно 50 OTK. Выжигаем их все.
-    let mut claimed = 0u32;
-    loop {
-        match bob_low
-            .keys()
-            .claim_one_time_key(alice_uid, alice_sid, None)
-            .await
-        {
-            Ok(_) => {
-                claimed += 1;
-                assert!(claimed <= 100, "sanity: too many OTKs claimed, something is off");
-            }
-            Err(e) => {
-                common::assert_server_code(e, "no_one_time_keys");
-                break;
-            }
-        }
+    CrossSigningKeys {
+        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
+        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
+        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
     }
-    assert_eq!(claimed, 50, "expected exactly 50 OTKs uploaded on register");
+}
 
-    // Ещё один claim — снова no_one_time_keys
-    let err = bob_low
-        .keys()
-        .claim_one_time_key(alice_uid, alice_sid, None)
+async fn setup_cs(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
+    let uid = low.user_id();
+    let sid = low.session_id();
+
+    let keys = CrossSigningKeysPrivate::generate();
+    low.crypto()
+        .upload_cross_signing_keys(build_cs_payload(uid, &keys))
         .await
-        .unwrap_err();
-    common::assert_server_code(err, "no_one_time_keys");
+        .expect("upload cs");
 
-    let mut a = alice;
-    let mut b = bob;
-    a.client.disconnect().await.ok();
-    b.client.disconnect().await.ok();
+    let own_ed = {
+        let acc = low.store().account().await;
+        let acc = acc.lock().await;
+        acc.ed25519_public_b64()
+    };
+    let dev_sig = sign_b64(&keys.ssk, &own_ed).expect("sign device");
+    low.crypto()
+        .upload_signatures(Signatures {
+            user_signatures: HashMap::new(),
+            device_signatures: [(sid, dev_sig)].into_iter().collect(),
+        })
+        .await
+        .expect("upload device sig");
+
+    keys
+}
+
+async fn sign_msk(
+    signer_low: &LockNetLowAgent,
+    signer_keys: &CrossSigningKeysPrivate,
+    target_uid: i64,
+) -> Result<(), String> {
+    let query = signer_low
+        .crypto()
+        .query_cross_signing_keys(vec![target_uid])
+        .await
+        .map_err(|e| format!("query target msk: {e:?}"))?;
+    let target_msk = query
+        .get(&target_uid)
+        .map(|u| u.master_key.key.clone())
+        .ok_or_else(|| format!("target {target_uid} msk not found"))?;
+
+    let sig = sign_b64(&signer_keys.usk, &target_msk).map_err(|e| format!("sign: {e:?}"))?;
+
+    signer_low
+        .crypto()
+        .upload_signatures(Signatures {
+            user_signatures: [(target_uid, sig)].into_iter().collect(),
+            device_signatures: HashMap::new(),
+        })
+        .await
+        .map_err(|e| format!("upload sig: {e:?}"))?;
+
+    Ok(())
+}
+
+// ---- tests ----
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn self_is_always_verified() {
+    let alice = common::register_new("tg_self_a").await;
+    let agent = alice.client.get_agent().expect("agent");
+
+    assert!(agent.security().is_user_verified(alice.session.user_id).await);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn claim_uses_one_time_keys_under_chosen_algorithm() {
-    let alice = common::register_new("keys_alg_a").await;
-    let bob = common::register_new("keys_alg_b").await;
+async fn no_trust_chain_returns_false() {
+    let alice = common::register_new("tg_none_a").await;
+    let bob = common::register_new("tg_none_b").await;
 
+    let alice_agent = alice.client.get_agent().expect("alice agent");
     let bob_low = bob.low();
-    let alice_uid = alice.session.user_id;
-    let alice_sid = alice.session.session_id;
 
-    // Явный algorithm="curve25519" — должно работать
-    let otk = bob_low
-        .keys()
-        .claim_one_time_key(alice_uid, alice_sid, Some("curve25519".to_string()))
+    setup_cs(&alice_agent.low()).await;
+    setup_cs(&bob_low).await;
+
+    let _ = alice_agent.user_info(bob.session.user_id).await;
+
+    assert!(
+        !alice_agent.security().is_user_verified(bob.session.user_id).await,
+        "без подписи USK->MSK доверия быть не должно"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn direct_trust_via_sas_signature() {
+    let alice = common::register_new("tg_direct_a").await;
+    let bob = common::register_new("tg_direct_b").await;
+
+    let alice_agent = alice.client.get_agent().expect("alice agent");
+    let bob_low = bob.low();
+    let alice_low = alice_agent.low();
+
+    let alice_cs = setup_cs(&alice_low).await;
+    setup_cs(&bob_low).await;
+
+    let _ = alice_agent.user_info(bob.session.user_id).await;
+
+    sign_msk(&alice_low, &alice_cs, bob.session.user_id)
         .await
-        .expect("claim curve25519");
-    assert!(otk.key_id.starts_with("curve25519:"));
+        .expect("alice signs bob msk");
 
-    // Неизвестный algorithm → no_one_time_keys (других алгоритмов нет)
-    let err = bob_low
-        .keys()
-        .claim_one_time_key(alice_uid, alice_sid, Some("signed_curve25519".to_string()))
+    assert!(
+        alice_agent.security().is_user_verified(bob.session.user_id).await,
+        "прямая подпись USK->MSK = доверие"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn transitive_trust_alice_bob_charlie() {
+    let alice = common::register_new("tg_trans_a").await;
+    let bob = common::register_new("tg_trans_b").await;
+    let charlie = common::register_new("tg_trans_c").await;
+
+    let alice_agent = alice.client.get_agent().expect("alice agent");
+    let alice_low = alice_agent.low();
+    let bob_low = bob.low();
+    let charlie_low = charlie.low();
+
+    let alice_cs = setup_cs(&alice_low).await;
+    let bob_cs = setup_cs(&bob_low).await;
+    let _charlie_cs = setup_cs(&charlie_low).await;
+
+    let _ = alice_agent.user_info(bob.session.user_id).await;
+    let _ = alice_agent.user_info(charlie.session.user_id).await;
+
+    sign_msk(&alice_low, &alice_cs, bob.session.user_id).await.expect("alice signs bob");
+    sign_msk(&bob_low, &bob_cs, charlie.session.user_id).await.expect("bob signs charlie");
+
+    assert!(
+        alice_agent.security().is_user_verified(bob.session.user_id).await,
+        "Alice -> Bob: прямая подпись"
+    );
+
+    assert!(
+        alice_agent.security().is_user_verified(charlie.session.user_id).await,
+        "Alice -> Bob -> Charlie: транзитивное доверие"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn revoke_breaks_chain() {
+    let alice = common::register_new("tg_rev_a").await;
+    let bob = common::register_new("tg_rev_b").await;
+    let charlie = common::register_new("tg_rev_c").await;
+
+    let alice_agent = alice.client.get_agent().expect("alice agent");
+    let alice_low = alice_agent.low();
+    let bob_low = bob.low();
+    let charlie_low = charlie.low();
+
+    let alice_cs = setup_cs(&alice_low).await;
+    let bob_cs = setup_cs(&bob_low).await;
+    let _charlie_cs = setup_cs(&charlie_low).await;
+
+    let _ = alice_agent.user_info(bob.session.user_id).await;
+    let _ = alice_agent.user_info(charlie.session.user_id).await;
+
+    sign_msk(&alice_low, &alice_cs, bob.session.user_id).await.unwrap();
+    sign_msk(&bob_low, &bob_cs, charlie.session.user_id).await.unwrap();
+
+    assert!(
+        alice_agent.security().is_user_verified(charlie.session.user_id).await,
+        "цепочка Alice -> Bob -> Charlie должна быть доверенной"
+    );
+
+    let charlie_pw = charlie.password.clone();
+    charlie_low
+        .crypto()
+        .reset_cross_signing_keys(&charlie_pw)
         .await
-        .unwrap_err();
-    common::assert_server_code(err, "no_one_time_keys");
+        .expect("charlie reset");
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
+    let mut fresh_client = LockNetClient::new(common::test_config());
+    let _ = fresh_client
+        .connection_request(Credentials::Session {
+            refresh_jwt: alice.session.rjwt.clone(),
+        })
+        .await
+        .expect("fresh session");
+    let fresh_agent = fresh_client.get_agent().expect("fresh agent");
+
+    let _ = fresh_agent.user_info(bob.session.user_id).await;
+    let _ = fresh_agent.user_info(charlie.session.user_id).await;
+
+    assert!(
+        fresh_agent.security().is_user_verified(bob.session.user_id).await,
+        "прямое доверие Alice -> Bob не должно ломаться"
+    );
+
+    assert!(
+        !fresh_agent.security().is_user_verified(charlie.session.user_id).await,
+        "после reset Charlie должен быть недостижим в цепочке"
+    );
+
+    fresh_client.disconnect().await.ok();
     let mut a = alice;
     let mut b = bob;
+    let mut c = charlie;
     a.client.disconnect().await.ok();
     b.client.disconnect().await.ok();
+    c.client.disconnect().await.ok();
 }

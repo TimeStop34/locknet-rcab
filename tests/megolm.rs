@@ -27,7 +27,6 @@ async fn setup_olm(
         .await
         .expect("setup decrypt");
 
-    // Реверсный warmup, чтобы Alice тоже имела inbound-сессию от Bob
     let mut rx2 = alice_low.subscribe();
     bob_low
         .olm()
@@ -41,7 +40,7 @@ async fn setup_olm(
 }
 
 async fn alice_curve25519(low: &LockNetLowAgent) -> String {
-    let acc = low.store().account();
+    let acc = low.store().account().await;
     let a = acc.lock().await;
     a.curve25519_public_b64()
 }
@@ -61,7 +60,6 @@ async fn megolm_full_flow() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "MegolmFull").await;
 
-    // Alice создаёт megolm-сессию
     let info = alice_low
         .megolm()
         .create(group_id)
@@ -70,7 +68,6 @@ async fn megolm_full_flow() {
     assert!(!info.session_key.is_empty());
     assert!(!info.megolm_session_id.is_empty());
 
-    // Раздача group_key Bob'у
     let mut bob_rx = bob_low.subscribe();
     alice_low
         .megolm()
@@ -81,7 +78,6 @@ async fn megolm_full_flow() {
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
     let Event::ToDevice(td) = evt else { unreachable!() };
 
-    // Проверяем, что сервер переписал sender_key/sender_session_id
     let alice_curve = alice_curve25519(&alice_low).await;
     assert_eq!(td.algorithm, "ln.encryption.olm.v1");
     assert_eq!(td.sender_key, alice_curve);
@@ -102,7 +98,6 @@ async fn megolm_full_flow() {
         .expect("import group key");
     assert!(is_group_key, "expected ln.encryption.group_key");
 
-    // Alice шифрует и шлёт
     let encrypted = alice_low
         .megolm()
         .encrypt(group_id, "hello megolm")
@@ -118,7 +113,6 @@ async fn megolm_full_flow() {
         .await
         .expect("send_message");
 
-    // Bob получает push и дешифрует
     let evt = common::wait_event(
         &mut bob_rx,
         |e| matches!(e, Event::MessageCreate(m) if m.message_id == ack.message_id),
@@ -134,7 +128,6 @@ async fn megolm_full_flow() {
         .expect("no plaintext");
     assert_eq!(pt, "hello megolm");
 
-    // Alice тоже может расшифровать своё (inbound сохранён при create)
     let page = alice_low
         .messages()
         .get(group_id, None, 20)
@@ -168,7 +161,6 @@ async fn megolm_no_key_cannot_decrypt() {
     let bob_low = bob.low();
     let group_id = common::setup_group_with_two(&alice, &bob, "MegolmNoKey").await;
 
-    // Alice создаёт сессию, но НЕ раздаёт ключ
     alice_low.megolm().create(group_id).await.expect("create");
     let encrypted = alice_low
         .megolm()
@@ -181,7 +173,6 @@ async fn megolm_no_key_cannot_decrypt() {
         .await
         .expect("send");
 
-    // Bob пытается расшифровать — None
     let pt = bob_low
         .megolm()
         .decrypt(group_id, &encrypted)
@@ -189,7 +180,6 @@ async fn megolm_no_key_cannot_decrypt() {
         .expect("decrypt attempt");
     assert!(pt.is_none(), "bob shouldn't decrypt without key, got {pt:?}");
 
-    // Неизвестный chat_id тоже → None
     let pt_unknown = bob_low
         .megolm()
         .decrypt(999_999_999, &encrypted)
@@ -216,7 +206,6 @@ async fn megolm_rotation_isolates() {
     setup_olm(&alice_low, &bob_low, bob_uid, bob_sid).await;
     let group_id = common::setup_group_with_two(&alice, &bob, "MegolmRot").await;
 
-    // Session 1
     let info1 = alice_low.megolm().create(group_id).await.expect("create #1");
     let mut bob_rx = bob_low.subscribe();
     alice_low
@@ -237,22 +226,18 @@ async fn megolm_rotation_isolates() {
     let pt1 = bob_low.megolm().decrypt(group_id, &enc1).await.unwrap().unwrap();
     assert_eq!(pt1, "msg1");
 
-    // Rotation
     let info2 = alice_low.megolm().rotate(group_id).await.expect("rotate");
     assert_ne!(info1.megolm_session_id, info2.megolm_session_id);
 
     let enc2 = alice_low.megolm().encrypt(group_id, "msg2").await.unwrap();
     assert_eq!(enc2.megolm_session_id, info2.megolm_session_id);
 
-    // Bob не может расшифровать msg2 (нет ключа для session2)
     let pt2 = bob_low.megolm().decrypt(group_id, &enc2).await.unwrap();
     assert!(pt2.is_none(), "bob shouldn't decrypt msg2");
 
-    // msg1 всё ещё дешифруется (у Bob есть session1)
     let pt1_again = bob_low.megolm().decrypt(group_id, &enc1).await.unwrap();
     assert_eq!(pt1_again.as_deref(), Some("msg1"));
 
-    // Alice сама видит оба
     assert_eq!(
         alice_low.megolm().decrypt(group_id, &enc1).await.unwrap().as_deref(),
         Some("msg1")
@@ -301,7 +286,6 @@ async fn megolm_decrypt_group_key_wrong_type_returns_false() {
     assert!(!bob_low.megolm().decrypt_group_key(pt_wrong_type).await.unwrap());
 
     let pt_missing_content = r#"{"type":"ln.encryption.group_key"}"#;
-    // content отсутствует → ошибка
     let res = bob_low.megolm().decrypt_group_key(pt_missing_content).await;
     assert!(res.is_err(), "expected error for missing content, got {res:?}");
 
@@ -330,9 +314,6 @@ async fn megolm_decrypt_wrong_algorithm_returns_none() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn megolm_import_roundtrip() {
-    // Проверяем import() в чистом виде: создать сессию у Alice,
-    // импортировать ключ у Bob напрямую через API (не через Olm),
-    // зашифровать/дешифровать.
     let alice = common::register_new("mg_imp_a").await;
     let bob = common::register_new("mg_imp_b").await;
     let alice_low = alice.low();
@@ -358,7 +339,6 @@ async fn megolm_import_roundtrip() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn megolm_share_group_key_via_olm_session() {
-    // Явно устанавливаем Olm-сессию заранее → group_key должен идти type=1
     let alice = common::register_new("mg_sgt_a").await;
     let bob = common::register_new("mg_sgt_b").await;
 
@@ -382,9 +362,8 @@ async fn megolm_share_group_key_via_olm_session() {
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
     let Event::ToDevice(td) = evt else { unreachable!() };
 
-    // Т.к. Olm-сессия установлена, group_key должен быть type=1
     let bob_curve = {
-        let acc = bob_low.store().account();
+        let acc = bob_low.store().account().await;
         let a = acc.lock().await;
         a.curve25519_public_b64()
     };
@@ -394,11 +373,9 @@ async fn megolm_share_group_key_via_olm_session() {
         "expected normal olm message (type=1) since olm session pre-established"
     );
 
-    // И Bob успешно импортирует
     let pt = bob_low.olm().decrypt(td).wait().await.unwrap().unwrap();
     assert!(bob_low.megolm().decrypt_group_key(&pt).await.unwrap());
 
-    // Таймаут защиты от висящих сообщений
     let _ = Duration::from_millis(10);
 
     let mut a = alice;

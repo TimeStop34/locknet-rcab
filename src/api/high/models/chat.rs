@@ -66,23 +66,12 @@ impl Chat {
         self.inner.low.groups().info(self.id()).await
     }
 
-    /// Защита от downgrade-атаки.
-    ///
-    /// Перед шифрованием мы должны **знать** политику группы. Если локального
-    /// `group_data_state` нет, различаем два случая:
-    ///
-    /// 1. **Создание** — мы создатель, сервер ещё не имеет `encrypted_group_data`.
-    ///    Можно создать новую политику с "creation defaults".
-    /// 2. **Recovery** — либо мы не создатель, либо сервер уже имеет blob.
-    ///    Нельзя создавать новую политику — это подменит строгую на мягкую
-    ///    (сервер мог специально скрыть blob). Нужно вызвать
-    ///    `request_missing_keys()` / дождаться `group_key` от другого устройства.
     async fn ensure_policy_known(&self) -> Result<()> {
         if !self.is_encrypted() {
             return Ok(());
         }
 
-        if self.inner.low.store().group_data_state(self.id()).is_some() {
+        if self.inner.low.store().group_data_state(self.id()).await.is_some() {
             return Ok(());
         }
 
@@ -90,19 +79,15 @@ impl Chat {
         if !is_creator {
             return Err(LockNetError::InvalidArgument(
                 "cannot send: group policy unknown (no local group_data, not creator). \
-                 Call request_missing_keys() first."
-                    .into(),
+                 Call request_missing_keys() first.".into(),
             ));
         }
 
-        // Создатель без локального state — проверяем сервер.
-        // Если blob есть — мы были в группе раньше, потеряли store.
         if let Ok(fresh) = self.inner.low.groups().info(self.id()).await {
             if fresh.encrypted_group_data.is_some() {
                 return Err(LockNetError::InvalidArgument(
                     "cannot send: server has group policy blob but local key missing. \
-                     Call request_missing_keys() to recover."
-                        .into(),
+                     Call request_missing_keys() to recover.".into(),
                 ));
             }
         }
@@ -110,11 +95,6 @@ impl Chat {
         Ok(())
     }
 
-        /// Синхронизирует локальную policy в сервер, если мы создатель
-    /// и блоб расходится. Идемпотентно.
-    ///
-    /// Вызывается после `megolm.ensure_session` (в send) и после ротации
-    /// в `process_event` (через `LockNetAgent::sync_policy_for_chat`).
     pub(crate) async fn sync_policy_to_server(&self) -> Result<()> {
         if !self.is_encrypted() {
             return Ok(());
@@ -122,16 +102,14 @@ impl Chat {
         let low = &self.inner.low;
         let chat_id = self.id();
 
-        // Только создатель может писать
         if self.inner.group.created_by != low.user_id() {
             return Ok(());
         }
 
-        let Some(state) = low.store().group_data_state(chat_id) else {
+        let Some(state) = low.store().group_data_state(chat_id).await else {
             return Ok(());
         };
 
-        // Сравниваем с тем, что сервер знает (актуальный snapshot в state.groups)
         let server_blob = {
             let st = self.inner.state.read().await;
             st.groups
@@ -145,7 +123,6 @@ impl Chat {
 
         low.groups().update_group_data(chat_id, &state.blob).await?;
 
-        // Обновляем snapshot в state.groups, чтобы следующий вызов не дёргал сеть
         {
             let mut st = self.inner.state.write().await;
             if let Some(g) = st.groups.get_mut(&chat_id) {
@@ -165,16 +142,13 @@ impl Chat {
 
             let info = low.megolm().ensure_session(chat_id).await?;
 
-            // Гарантируем, что сервер знает нашу policy (для anti-downgrade
-            // проверки при восстановлении на другом устройстве).
             self.sync_policy_to_server().await?;
 
             let need_fanout = {
                 let guard = self.inner.coverage.read().await;
                 match &*guard {
                     Some((sid, cnt)) => {
-                        sid != &info.megolm_session_id
-                            || *cnt != self.inner.group.member_count
+                        sid != &info.megolm_session_id || *cnt != self.inner.group.member_count
                     }
                     None => true,
                 }
@@ -184,17 +158,9 @@ impl Chat {
                 let fresh = low.groups().info(chat_id).await.ok();
                 let (participant_ids, member_count): (Vec<i64>, usize) =
                     match fresh.as_ref().and_then(|g| g.members.as_ref()) {
-                        Some(list) => (
-                            list.iter().map(|m| m.user_id).collect(),
-                            list.len(),
-                        ),
+                        Some(list) => (list.iter().map(|m| m.user_id).collect(), list.len()),
                         None => (
-                            self.inner
-                                .group
-                                .members
-                                .iter()
-                                .map(|m| m.user.id)
-                                .collect(),
+                            self.inner.group.members.iter().map(|m| m.user.id).collect(),
                             self.inner.group.member_count,
                         ),
                     };
@@ -202,17 +168,12 @@ impl Chat {
                     let policy = low
                         .store()
                         .group_data_state(chat_id)
+                        .await
                         .map(|s| s.data.megolm_rotation_visibility)
                         .unwrap_or(crate::core::policies::MegolmRotationVisibility::OnlyVerifiedUsers);
                     crate::api::high::group_key::fan_out_group_key(
-                        &low,
-                        chat_id,
-                        &participant_ids,
-                        &info,
-                        policy,
-                        &self.inner.security,
-                    )
-                    .await?;
+                        &low, chat_id, &participant_ids, &info, policy, &self.inner.security,
+                    ).await?;
                 }
                 *self.inner.coverage.write().await =
                     Some((info.megolm_session_id.clone(), member_count));
@@ -283,9 +244,7 @@ impl Chat {
                     } else {
                         let t = low.megolm().decrypt(chat_id, enc).await.ok().flatten();
                         let was_enc = t.is_none();
-                        if was_enc {
-                            missing.push(dto.message_id);
-                        }
+                        if was_enc { missing.push(dto.message_id); }
                         (t, true)
                     }
                 }
@@ -304,9 +263,7 @@ impl Chat {
                 created_at: dto.created_at,
                 edited_at: dto.edited_at,
                 deleted: dto.deleted,
-                reactions: dto
-                    .reactions
-                    .into_iter()
+                reactions: dto.reactions.into_iter()
                     .map(|r| Reaction { emoji: r.emoji, user_ids: r.user_ids, count: r.count })
                     .collect(),
             });
@@ -314,11 +271,8 @@ impl Chat {
 
         if !missing.is_empty() {
             let mut st = self.inner.state.write().await;
-            for mid in &missing {
-                st.push_pending_decrypt(chat_id, *mid);
-            }
+            for mid in &missing { st.push_pending_decrypt(chat_id, *mid); }
         }
-
         Ok(result)
     }
 
@@ -330,33 +284,25 @@ impl Chat {
             let st = self.inner.state.read().await;
             st.pending_decrypt_for(chat_id)
         };
-        if pending.is_empty() {
-            return Ok((0, 0));
-        }
+        if pending.is_empty() { return Ok((0, 0)); }
 
         let our_uid = low.user_id();
         let our_sid = low.session_id();
         let created_by = self.inner.group.created_by;
 
         let mut query_uids: Vec<i64> = vec![our_uid];
-        if created_by != 0 && created_by != our_uid {
-            query_uids.push(created_by);
-        }
+        if created_by != 0 && created_by != our_uid { query_uids.push(created_by); }
         let all_sessions = low.keys().query(query_uids.clone()).await?;
 
         let mut candidates: Vec<(i64, i64)> = Vec::new();
         if let Some(sess) = all_sessions.get(&our_uid) {
             for sid in sess.keys() {
-                if *sid != our_sid {
-                    candidates.push((our_uid, *sid));
-                }
+                if *sid != our_sid { candidates.push((our_uid, *sid)); }
             }
         }
         if created_by != 0 && created_by != our_uid {
             if let Some(sess) = all_sessions.get(&created_by) {
-                for sid in sess.keys() {
-                    candidates.push((created_by, *sid));
-                }
+                for sid in sess.keys() { candidates.push((created_by, *sid)); }
             }
         }
 
@@ -366,17 +312,9 @@ impl Chat {
 
         for (target_uid, target_sid) in candidates {
             let mut high_rx = self.inner.high_event_tx.subscribe();
-
-            let txid = match low
-                .key_sharing()
-                .send_request_only(target_uid, target_sid, vec![chat_id])
-                .await
-            {
+            let txid = match low.key_sharing().send_request_only(target_uid, target_sid, vec![chat_id]).await {
                 Ok(t) => t,
-                Err(e) => {
-                    last_err = Some(e);
-                    continue;
-                }
+                Err(e) => { last_err = Some(e); continue; }
             };
 
             let mut session_imported = 0u32;
@@ -386,33 +324,19 @@ impl Chat {
             let deadline = tokio::time::Instant::now() + KEY_REQUEST_TIMEOUT;
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() {
-                    last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT));
-                    break;
-                }
+                if remaining.is_zero() { last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT)); break; }
                 match tokio::time::timeout(remaining, high_rx.recv()).await {
-                    Ok(Ok(HighEvent::KeyRequestImported { txid: t, .. })) if t == txid => {
-                        session_imported += 1;
-                    }
+                    Ok(Ok(HighEvent::KeyRequestImported { txid: t, .. })) if t == txid => { session_imported += 1; }
                     Ok(Ok(HighEvent::KeyRequestDone { txid: t, total_imported })) if t == txid => {
-                        session_imported = total_imported;
-                        session_done = true;
-                        break;
+                        session_imported = total_imported; session_done = true; break;
                     }
                     Ok(Ok(HighEvent::KeyRequestDenied { txid: t, reason })) if t == txid => {
-                        denied_reason = Some(reason);
-                        break;
+                        denied_reason = Some(reason); break;
                     }
                     Ok(Ok(_)) => continue,
                     Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-                    Ok(Err(_)) => {
-                        last_err = Some(LockNetError::RunnerDown);
-                        break;
-                    }
-                    Err(_) => {
-                        last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT));
-                        break;
-                    }
+                    Ok(Err(_)) => { last_err = Some(LockNetError::RunnerDown); break; }
+                    Err(_) => { last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT)); break; }
                 }
             }
 
@@ -422,24 +346,15 @@ impl Chat {
                 break;
             }
             if let Some(r) = denied_reason {
-                last_err = Some(LockNetError::Server {
-                    code: "key_denied".into(),
-                    message: r,
-                });
+                last_err = Some(LockNetError::Server { code: "key_denied".into(), message: r });
             }
         }
 
-        {
-            let mut st = self.inner.state.write().await;
-            st.clear_pending_decrypt(chat_id);
-        }
+        { let mut st = self.inner.state.write().await; st.clear_pending_decrypt(chat_id); }
 
         if !any_done && imported_total == 0 {
-            if let Some(e) = last_err {
-                return Err(e);
-            }
+            if let Some(e) = last_err { return Err(e); }
         }
-
         Ok((pending.len(), imported_total))
     }
 

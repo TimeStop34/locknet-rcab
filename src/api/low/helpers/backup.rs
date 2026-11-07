@@ -158,8 +158,8 @@ impl LockNetBackupHelper {
         let version = self.new_version(BACKUP_ALGORITHM, auth_data).await?;
 
         let mut items: HashMap<String, Value> = HashMap::new();
-        for (chat_id, megolm_session_id) in self.store.megolm_inbound_all() {
-            let session = match self.store.megolm_inbound(chat_id, &megolm_session_id) {
+        for (chat_id, megolm_session_id) in self.store.megolm_inbound_all().await {
+            let session = match self.store.megolm_inbound(chat_id, &megolm_session_id).await {
                 Some(s) => s,
                 None => continue,
             };

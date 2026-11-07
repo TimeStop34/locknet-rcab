@@ -151,7 +151,7 @@ impl LockNetClient {
 
         if is_fresh {
             let device_keys = {
-                let account = self.store.account();
+                let account = self.store.account().await;
                 let mut acc = account.lock().await;
                 acc.generate_one_time_keys(50);
                 let otks = acc.one_time_keys_b64();

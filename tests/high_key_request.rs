@@ -47,7 +47,7 @@ async fn setup_cross_signing(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
         .expect("upload cross-signing");
 
     let own_ed = {
-        let acc = low.store().account();
+        let acc = low.store().account().await;
         let acc = acc.lock().await;
         acc.ed25519_public_b64()
     };
@@ -189,6 +189,14 @@ async fn new_device_recovers_history_from_sibling_device() {
         .expect("request_missing_keys");
     assert!(pending_count >= 2, "pending_count={pending_count}");
     assert!(imported >= 1, "imported={imported}");
+
+    // Фикс: sibling-recovery через key_request передаёт group_data — Bob2
+    // должен получить policy. Без этого Chat::ensure_policy_known откажет
+    // на send после recovery (read работает, write — нет).
+    assert!(
+        bob2_low.store().group_data_state(group_id).await.is_some(),
+        "Bob2 должен получить group_data через key_request"
+    );
 
     // 7. Повторно читаем — расшифровывается
     let history_read = bob2_chat.messages(None, 20).await.expect("bob2 messages #2");

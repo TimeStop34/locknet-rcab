@@ -4,7 +4,8 @@ use tokio::sync::mpsc;
 use crate::api::low::command::{dispatch, Cmd};
 use crate::api::low::models::{Otk, QueryKeysResult, ToDevicePayload};
 use crate::core::crypto::olm::{
-    create_inbound, create_outbound, curve_from_b64, decrypt_olm, encrypt_olm, parse_prekey, EncryptedOlm, OlmSessionEntry, OLM_ALGORITHM,
+    create_inbound, create_outbound, curve_from_b64, decrypt_olm, encrypt_olm, parse_prekey,
+    EncryptedOlm, OlmSessionEntry, OLM_ALGORITHM,
 };
 use crate::core::crypto::CryptoStore;
 use crate::core::errors::{LockNetError, Result};
@@ -26,7 +27,7 @@ impl LockNetOlmHelper {
 }
 
 async fn send_impl(cmd_tx: mpsc::Sender<Cmd>, store: Arc<dyn CryptoStore>, to_user_id: i64, to_session_id: i64, plaintext: String) -> Result<()> {
-    if let Some(entry) = store.olm_sessions(to_session_id).into_iter().last() {
+    if let Some(entry) = store.olm_sessions(to_session_id).await.into_iter().last() {
         let encrypted = { let mut session = entry.session.lock().await; encrypt_olm(&mut session, &plaintext) };
         send_to_device(&cmd_tx, to_user_id, to_session_id, &entry.their_curve25519, &encrypted).await?;
         return Ok(());
@@ -44,11 +45,14 @@ async fn send_impl(cmd_tx: mpsc::Sender<Cmd>, store: Arc<dyn CryptoStore>, to_us
     let their_identity = curve_from_b64(&their_curve)?;
     let otk_key = curve_from_b64(&otk.key)?;
 
-    let account = store.account();
+    let account = store.account().await;
     let mut session = { let acc = account.lock().await; create_outbound(acc.inner(), their_identity, otk_key) };
     let encrypted = encrypt_olm(&mut session, &plaintext);
-    let entry = OlmSessionEntry { session: Arc::new(tokio::sync::Mutex::new(session)), their_curve25519: their_curve.clone() };
-    store.olm_add(to_session_id, entry);
+    let entry = OlmSessionEntry {
+        session: Arc::new(tokio::sync::Mutex::new(session)),
+        their_curve25519: their_curve.clone(),
+    };
+    store.olm_add(to_session_id, entry).await;
 
     send_to_device(&cmd_tx, to_user_id, to_session_id, &their_curve, &encrypted).await?;
     Ok(())
@@ -73,11 +77,15 @@ async fn decrypt_impl(store: Arc<dyn CryptoStore>, payload: ToDevicePayload) -> 
         return Err(LockNetError::InvalidResponse(format!("unexpected algorithm: {}", payload.algorithm)));
     }
     let peer_session_id = payload.sender_session_id;
-    let our_curve = { let account = store.account(); let acc = account.lock().await; acc.curve25519_public_b64() };
+    let our_curve = {
+        let account = store.account().await;
+        let acc = account.lock().await;
+        acc.curve25519_public_b64()
+    };
     let inner = payload.ciphertext.get(&our_curve).or_else(|| payload.ciphertext.values().next())
         .ok_or_else(|| LockNetError::InvalidResponse("no matching ciphertext".into()))?;
 
-    for entry in store.olm_sessions(peer_session_id).into_iter().rev() {
+    for entry in store.olm_sessions(peer_session_id).await.into_iter().rev() {
         let mut session = entry.session.lock().await;
         if let Ok(pt) = decrypt_olm(&mut session, inner.ciphertext_type, &inner.body) {
             return Ok(Some(pt));
@@ -87,14 +95,17 @@ async fn decrypt_impl(store: Arc<dyn CryptoStore>, payload: ToDevicePayload) -> 
     if inner.ciphertext_type == 0 {
         let prekey = parse_prekey(&inner.body)?;
         let their_identity = curve_from_b64(&payload.sender_key)?;
-        let account = store.account();
+        let account = store.account().await;
         let mut acc = account.lock().await;
         let result = create_inbound(acc.inner_mut(), their_identity, &prekey)?;
         drop(acc);
 
         let plaintext = String::from_utf8(result.plaintext).map_err(|e| LockNetError::InvalidResponse(format!("olm utf8: {e}")))?;
-        let entry = OlmSessionEntry { session: Arc::new(tokio::sync::Mutex::new(result.session)), their_curve25519: payload.sender_key.clone() };
-        store.olm_add(peer_session_id, entry);
+        let entry = OlmSessionEntry {
+            session: Arc::new(tokio::sync::Mutex::new(result.session)),
+            their_curve25519: payload.sender_key.clone(),
+        };
+        store.olm_add(peer_session_id, entry).await;
         return Ok(Some(plaintext));
     }
     Ok(None)

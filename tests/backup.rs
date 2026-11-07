@@ -9,8 +9,6 @@ use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, DeviceKeys, Signatures};
 use locknet_rcab::{Credentials, LockNetClient, LockNetLowAgent};
 
-// ---- helpers ----
-
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
     let ssk_pub = keys.ssk_pub_b64();
@@ -47,7 +45,7 @@ async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
         .expect("upload cross-signing");
 
     let own_ed = {
-        let acc = low.store().account();
+        let acc = low.store().account().await;
         let acc = acc.lock().await;
         acc.ed25519_public_b64()
     };
@@ -65,7 +63,7 @@ async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
 
 async fn upload_keys_for_low(low: &LockNetLowAgent) {
     let keys = {
-        let account = low.store().account();
+        let account = low.store().account().await;
         let mut acc = account.lock().await;
         acc.generate_one_time_keys(50);
         let otks = acc.one_time_keys_b64();

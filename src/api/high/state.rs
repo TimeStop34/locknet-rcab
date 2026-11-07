@@ -6,7 +6,6 @@ use crate::api::high::verification::qr::QrFlow;
 use crate::api::low::models as low_models;
 use super::models::{Group, GroupMember, Invite, Message, Reaction, User};
 use super::models::chat::PLAINTEXT_ALGORITHM;
-use crate::LockNetLowAgent;
 
 #[derive(Debug, Clone)]
 pub(crate) struct PendingSasStart {
@@ -29,9 +28,6 @@ pub(crate) struct ClientState {
     pub active_sas: HashMap<String, Arc<Mutex<SasFlow>>>,
     pub pending_sas_starts: HashMap<String, PendingSasStart>,
     pub active_qr: HashMap<String, Arc<Mutex<QrFlow>>>,
-
-    /// Кэш Web-of-Trust: все user_id, достижимые от нашего user_id
-    /// по цепочке USK-подписей. `None` = ещё не построен.
     pub reachable_users: Option<HashSet<i64>>,
 }
 
@@ -51,23 +47,14 @@ impl ClientState {
         self.users.entry(user_id).or_insert_with(|| User::unknown(user_id)).clone()
     }
 
-    /// Собирает high-domain `Group` из low DTO + локальный `CryptoStore`.
-    ///
-    /// `group_data` берётся из `store.group_data_state(chat_id)`. Если есть
-    /// локальный state и сервер прислал `encrypted_group_data` с **большей**
-    /// версией — пробуем расшифровать серверный blob локальным `group_data_key`
-    /// и обновить store (recovery при ротации от другого устройства).
-    ///
-    /// Если локального state нет — `group_data = None`. Политики резолвятся
-    /// как safe default (`AfterJoin` + `OnlyVerifiedUsers`).
     pub async fn group_to_domain(
         &mut self,
         dto: &low_models::Group,
-        low: &Arc<LockNetLowAgent>,
+        low: &Arc<crate::api::low::agent::LockNetLowAgent>,
     ) -> Group {
         use crate::core::crypto::group_data::decrypt_group_data;
 
-        let mut local_state = low.store().group_data_state(dto.id);
+        let mut local_state = low.store().group_data_state(dto.id).await;
 
         if let (Some(state), Some(blob)) = (local_state.as_ref(), dto.encrypted_group_data.as_ref()) {
             if let Ok(server_data) = decrypt_group_data(blob, &state.key) {
@@ -83,7 +70,7 @@ impl ClientState {
                         data: server_data,
                         blob: blob.clone(),
                     };
-                    low.store().group_data_state_put(dto.id, new_state.clone());
+                    low.store().group_data_state_put(dto.id, new_state.clone()).await;
                     local_state = Some(new_state);
                 } else if server_data.version < state.data.version {
                     tracing::warn!(

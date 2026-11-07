@@ -38,7 +38,11 @@ async fn setup_cs(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
     let sid = low.session_id();
     let keys = CrossSigningKeysPrivate::generate();
     low.crypto().upload_cross_signing_keys(build_cs_payload(uid, &keys)).await.expect("upload cs");
-    let own_ed = { let acc = low.store().account(); let acc = acc.lock().await; acc.ed25519_public_b64() };
+    let own_ed = {
+        let acc = low.store().account().await;
+        let acc = acc.lock().await;
+        acc.ed25519_public_b64()
+    };
     let dev_sig = sign_b64(&keys.ssk, &own_ed).expect("sign device");
     low.crypto().upload_signatures(Signatures {
         user_signatures: HashMap::new(),
@@ -61,7 +65,7 @@ async fn set_megolm_visibility(low: &LockNetLowAgent, chat_id: i64, vis: MegolmR
     use locknet_rcab::core::policies::GroupDataState;
     use locknet_rcab::core::crypto::group_data::encrypt_group_data;
 
-    let state = low.store().group_data_state(chat_id).expect("group_data");
+    let state = low.store().group_data_state(chat_id).await.expect("group_data");
     let mut data = state.data.clone();
     data.version += 1;
     data.megolm_rotation_visibility = vis;
@@ -70,7 +74,7 @@ async fn set_megolm_visibility(low: &LockNetLowAgent, chat_id: i64, vis: MegolmR
         key: state.key,
         data,
         blob,
-    });
+    }).await;
 }
 
 async fn wait_high<F>(rx: &mut broadcast::Receiver<HighEvent>, pred: F) -> HighEvent
@@ -93,8 +97,6 @@ where
     }
 }
 
-// ---- tests ----
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_members_reaches_everyone() {
     let alice = common::register_new("mv_all_a").await;
@@ -106,19 +108,13 @@ async fn all_members_reaches_everyone() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "MVAll").await;
 
-    // Политика AllMembers (даже без CS у Bob и Alice)
-    // Create session первым, чтобы group_data появилось
     alice_low.megolm().create(group_id).await.expect("create");
     set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::AllMembers).await;
 
-    // Bob подписан
     let mut bob_rx = bob_agent.subscribe();
-
-    // Alice отправляет сообщение — fan-out должен произойти без CS
     let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
     let sent = alice_chat.send("hello all").await.expect("send");
 
-    // Bob должен получить и расшифровать
     let evt = wait_high(&mut bob_rx, |e| {
         matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
     })
@@ -146,16 +142,13 @@ async fn only_verified_sessions_skips_unverified() {
     let alice_low = alice_agent.low();
     let bob_low = bob_agent.low();
 
-    // Bob с CS + device signed; Charlie — без CS
     setup_cs(&bob_low).await;
 
-    // Создаём группу с Bob и Charlie
     let group = alice_agent
         .create_group("MVOVS", false, None, vec![bob.session.user_id, charlie.session.user_id])
         .await
         .expect("create");
 
-    // Принимаем приглашения
     let bob_inv = bob_agent.invites().await.unwrap().into_iter().find(|i| i.group.id == group.id()).unwrap();
     bob_agent.accept_invite(bob_inv.id).await.unwrap();
 
@@ -163,18 +156,15 @@ async fn only_verified_sessions_skips_unverified() {
     let charlie_inv = charlie_low.groups().invites().await.unwrap().into_iter().find(|i| i.group_id == group.id()).unwrap();
     charlie_low.groups().accept_invite(charlie_inv.id).await.unwrap();
 
-    // Создаём сессию, устанавливаем политику
     alice_low.megolm().create(group.id()).await.unwrap();
     set_megolm_visibility(&alice_low, group.id(), MegolmRotationVisibility::OnlyVerifiedSessions).await;
 
-    // Bob и Charlie подписаны на push
     let mut bob_rx = bob_agent.subscribe();
     let mut charlie_rx = charlie_agent.subscribe();
 
     let alice_chat = alice_agent.chat(group.id()).await.unwrap();
     let sent = alice_chat.send("secret").await.unwrap();
 
-    // Bob получает и расшифровывает
     let evt_b = wait_high(&mut bob_rx, |e| {
         matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
     })
@@ -183,7 +173,6 @@ async fn only_verified_sessions_skips_unverified() {
         assert_eq!(message.text.as_deref(), Some("secret"), "Bob должен расшифровать");
     }
 
-    // Charlie — получает push, но НЕ может расшифровать (нет ключа)
     let evt_c = wait_high(&mut charlie_rx, |e| {
         matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
     })
@@ -210,16 +199,13 @@ async fn only_verified_users_skips_untrusted() {
     let alice_low = alice_agent.low();
     let bob_low = bob_agent.low();
 
-    // У Bob есть CS, но Alice его не верифицировала
     setup_cs(&bob_low).await;
 
     let group_id = common::setup_group_with_two(&alice, &bob, "MVOVU").await;
 
-    // Создаём сессию, политика OnlyVerifiedUsers
     alice_low.megolm().create(group_id).await.unwrap();
     set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::OnlyVerifiedUsers).await;
 
-    // Заставляем Alice знать про Bob (но не доверять)
     let _ = alice_agent.user_info(bob.session.user_id).await;
 
     let mut bob_rx = bob_agent.subscribe();
@@ -227,7 +213,6 @@ async fn only_verified_users_skips_untrusted() {
     let alice_chat = alice_agent.chat(group_id).await.unwrap();
     let sent = alice_chat.send("super secret").await.unwrap();
 
-    // Bob получает push, но text = None
     let evt = wait_high(&mut bob_rx, |e| {
         matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
     })
@@ -258,15 +243,12 @@ async fn only_verified_users_reaches_after_usk_signature() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "MVOVUUSK").await;
 
-    // Политика OnlyVerifiedUsers
     alice_low.megolm().create(group_id).await.unwrap();
     set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::OnlyVerifiedUsers).await;
 
-    // Alice USK подписывает Bob
     let _ = alice_agent.user_info(bob.session.user_id).await;
     sign_msk(&alice_low, &alice_cs, bob.session.user_id).await;
 
-    // Даём время event'у обновить кэш
     tokio::time::sleep(Duration::from_millis(300)).await;
 
     let mut bob_rx = bob_agent.subscribe();
@@ -303,13 +285,8 @@ async fn rotation_on_membership_respects_policy() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "MVRot").await;
 
-    // Создаём сессию + политика OnlyVerifiedSessions
     alice_low.megolm().create(group_id).await.unwrap();
     set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::OnlyVerifiedSessions).await;
-
-    // Bob получает первое сообщение (fan-out с AllMembers до установки политики? — нет, политика уже установлена)
-    // Проверим что при membership_changed Bob НЕ получает новый ключ, если он leave
-    // (тут Bob уже member с CS+device — должен получать)
 
     let mut bob_rx = bob_agent.subscribe();
     let alice_chat = alice_agent.chat(group_id).await.unwrap();
@@ -322,7 +299,6 @@ async fn rotation_on_membership_respects_policy() {
         assert_eq!(message.text.as_deref(), Some("pre-leave"), "Bob может читать");
     }
 
-    // Bob leaves → ротация; Bob не должен получить новый ключ
     let mut alice_rx = alice_agent.subscribe();
     bob_agent.leave_chat(group_id).await.unwrap();
     let _ = wait_high(&mut alice_rx, |e| {
@@ -333,9 +309,8 @@ async fn rotation_on_membership_respects_policy() {
     let sent2 = alice_chat2.send("post-leave").await.unwrap();
     let s2 = sent2.encrypted_payload.as_ref().unwrap().megolm_session_id.clone();
 
-    // Bob не должен иметь s2 (fan-out не включил — Bob не member)
     assert!(
-        bob_low.store().megolm_inbound(group_id, &s2).is_none(),
+        bob_low.store().megolm_inbound(group_id, &s2).await.is_none(),
         "Bob не должен иметь ключ для post-leave сообщения"
     );
 

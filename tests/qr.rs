@@ -9,8 +9,6 @@ use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{Credentials, Event, LockNetClient, LockNetLowAgent};
 
-// ---- helpers ----
-
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
     let ssk_pub = keys.ssk_pub_b64();
@@ -36,7 +34,7 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
 }
 
 async fn own_ed25519(low: &LockNetLowAgent) -> String {
-    let acc = low.store().account();
+    let acc = low.store().account().await;
     let acc = acc.lock().await;
     acc.ed25519_public_b64()
 }
@@ -115,7 +113,7 @@ fn b64_no_pad(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
 }
 
-// ---- tests ----
+// ---- tests (сами тесты — те же, что были, без изменений) ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode0_user_to_user_full_flow() {
@@ -182,7 +180,6 @@ async fn qr_mode0_user_to_user_full_flow() {
     let bob_mk = bob_flow.mac_key().copied().expect("bob mac_key");
     assert_eq!(alice_mk, bob_mk, "mac_key должен совпасть");
 
-    // exchange_mac у обеих сторон одновременно
     let (alice_res, bob_res) = tokio::time::timeout(
         Duration::from_secs(10),
         async {

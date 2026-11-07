@@ -9,8 +9,6 @@ use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{Event, LockNetError, LockNetLowAgent};
 use serde_json::Value;
 
-// ---- helpers ----
-
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
     let ssk_pub = keys.ssk_pub_b64();
@@ -36,7 +34,7 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
 }
 
 async fn own_ed25519(low: &LockNetLowAgent) -> String {
-    let acc = low.store().account();
+    let acc = low.store().account().await;
     let acc = acc.lock().await;
     acc.ed25519_public_b64()
 }
@@ -123,8 +121,6 @@ async fn peer_keys(
     (ed, msk)
 }
 
-// ---- tests ----
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_full_flow_with_peer_verification() {
     let alice = common::register_new("sas_ok_a").await;
@@ -146,7 +142,6 @@ async fn sas_full_flow_with_peer_verification() {
     let a_msk = a_keys.msk_pub_b64();
     let b_msk = b_keys.msk_pub_b64();
 
-    // peer keys для SAS: Alice-flow смотрит на Bob, Bob-flow смотрит на Alice
     let (peer_ed_a, peer_msk_a) = peer_keys(&alice_low, bob_uid, bob_sid).await;
     let (peer_ed_b, peer_msk_b) = peer_keys(&bob_low, alice_uid, alice_sid).await;
 
@@ -155,7 +150,6 @@ async fn sas_full_flow_with_peer_verification() {
     assert_eq!(a_ed, peer_ed_b, "Bob должен видеть тот же ed25519 Alice");
     assert_eq!(a_msk, peer_msk_b, "Bob должен видеть тот же MSK Alice");
 
-    // 1. Alice стартует SAS
     let mut bob_setup_rx = bob_low.subscribe();
     let mut alice_flow = alice_low
         .verification()
@@ -163,7 +157,6 @@ async fn sas_full_flow_with_peer_verification() {
         .await
         .expect("alice sas_start");
 
-    // 2. Bob получает START
     let evt = common::wait_event(&mut bob_setup_rx, |e| matches!(e, Event::ToDevice(_))).await;
     let Event::ToDevice(start_payload) = evt else { unreachable!() };
     let pt = bob_low
@@ -184,14 +177,12 @@ async fn sas_full_flow_with_peer_verification() {
         .expect("txid present")
         .to_string();
 
-    // 3. Bob responder
     let mut bob_flow = bob_low
         .verification()
         .sas_start_responder(alice_uid, alice_sid, txid.clone(), b_msk.clone(), b_ed.clone())
         .await
         .expect("bob responder");
 
-    // 4. Alice.next
     let step_alice = tokio::time::timeout(Duration::from_secs(10), alice_flow.next())
         .await
         .expect("alice next timeout")
@@ -201,7 +192,6 @@ async fn sas_full_flow_with_peer_verification() {
         other => panic!("alice expected Emoji, got {other:?}"),
     };
 
-    // 5. Bob.next
     let step_bob = tokio::time::timeout(Duration::from_secs(10), bob_flow.next())
         .await
         .expect("bob next timeout")
@@ -217,11 +207,9 @@ async fn sas_full_flow_with_peer_verification() {
         assert_eq!(a.symbol, b.symbol, "emoji[{i}] mismatch: {} vs {}", a.symbol, b.symbol);
     }
 
-    // 6. Установка peer keys
     alice_flow.set_peer_keys(peer_ed_a, peer_msk_a);
     bob_flow.set_peer_keys(peer_ed_b, peer_msk_b);
 
-    // 7. Confirm → MAC
     alice_flow.confirm_emoji(true).await.expect("alice confirm");
     bob_flow.confirm_emoji(true).await.expect("bob confirm");
 
@@ -362,17 +350,14 @@ async fn sas_mac_mismatch_cancels() {
     let _ = alice_flow.next().await.expect("alice next");
     let _ = bob_flow.next().await.expect("bob next");
 
-    // Alice ставит СВОИ ключи вместо Bob'а (mismatch)
     alice_flow.set_peer_keys(a_ed.clone(), a_keys.msk_pub_b64());
 
-    // Bob — правильные ключи Alice
     let (peer_ed_a_for_bob, peer_msk_a_for_bob) = peer_keys(&bob_low, alice_uid, alice_sid).await;
     bob_flow.set_peer_keys(peer_ed_a_for_bob, peer_msk_a_for_bob);
 
     alice_flow.confirm_emoji(true).await.expect("alice confirm");
     bob_flow.confirm_emoji(true).await.expect("bob confirm");
 
-    // Alice: неверные peer keys → MAC mismatch
     let final_alice = tokio::time::timeout(Duration::from_secs(10), alice_flow.next())
         .await
         .expect("alice timeout")
@@ -384,7 +369,6 @@ async fn sas_mac_mismatch_cancels() {
         other => panic!("alice expected Cancelled(MAC mismatch), got {other:?}"),
     }
 
-    // Bob: правильные peer keys Alice → Verified
     let final_bob = tokio::time::timeout(Duration::from_secs(10), bob_flow.next())
         .await
         .expect("bob timeout")

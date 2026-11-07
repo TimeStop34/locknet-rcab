@@ -8,8 +8,6 @@ use locknet_rcab::core::policies::HistoryVisibility;
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{LockNetError, LockNetLowAgent};
 
-// ---- helpers ----
-
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
     let ssk_pub = keys.ssk_pub_b64();
@@ -47,7 +45,7 @@ async fn setup_high(user: &common::TestUser) -> CrossSigningKeysPrivate {
         .expect("upload cs");
 
     let own_ed = {
-        let acc = low.store().account();
+        let acc = low.store().account().await;
         let acc = acc.lock().await;
         acc.ed25519_public_b64()
     };
@@ -81,7 +79,6 @@ async fn sign_msk(
         .await
         .expect("upload sig");
 
-    // Явно инвалидируем кэш — событие пойдёт подписанному, а не нам.
     signer_agent.security().invalidate_trust_cache().await;
 }
 
@@ -89,7 +86,7 @@ async fn set_history_visibility(low: &LockNetLowAgent, chat_id: i64, vis: Histor
     use locknet_rcab::core::crypto::group_data::encrypt_group_data;
     use locknet_rcab::core::policies::GroupDataState;
 
-    let state = low.store().group_data_state(chat_id).expect("group_data");
+    let state = low.store().group_data_state(chat_id).await.expect("group_data");
     let mut data = state.data.clone();
     data.version += 1;
     data.history_visibility = vis;
@@ -97,18 +94,14 @@ async fn set_history_visibility(low: &LockNetLowAgent, chat_id: i64, vis: Histor
     low.store().group_data_state_put(
         chat_id,
         GroupDataState { key: state.key, data, blob },
-    );
+    ).await;
 }
 
-/// Alice создаёт megolm-сессию и шлёт сообщение **без fan-out**
-/// (low-level), чтобы получатель не мог расшифровать.
 async fn alice_send_no_fanout(low: &LockNetLowAgent, chat_id: i64, text: &str) -> i64 {
     low.megolm().create(chat_id).await.expect("create");
     let enc = low.megolm().encrypt(chat_id, text).await.expect("encrypt");
     low.messages().send(chat_id, enc).await.expect("send").message_id
 }
-
-// ---- tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn after_join_denies_all() {
@@ -127,16 +120,13 @@ async fn after_join_denies_all() {
 
     let msg_id = alice_send_no_fanout(&alice_low, group_id, "secret").await;
 
-    // AfterJoin
     set_history_visibility(&alice_low, group_id, HistoryVisibility::AfterJoin).await;
 
-    // Bob читает — pending
     let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == msg_id).expect("msg in history");
     assert_eq!(msg.text, None, "Bob без ключа не может читать");
 
-    // Request → Denied("history_visibility_policy")
     let err = bob_chat.request_missing_keys().await.unwrap_err();
     match err {
         LockNetError::Server { code, message } => {
@@ -206,12 +196,10 @@ async fn all_verified_users_requires_user_trust() {
     let group_id = common::setup_group_with_two(&alice, &bob, "HVAllUsers").await;
     let msg_id = alice_send_no_fanout(&alice_low, group_id, "secret").await;
 
-    // Alice знает про Bob
     let _ = alice_agent.user_info(bob_uid).await;
 
     set_history_visibility(&alice_low, group_id, HistoryVisibility::AllVerifiedUsers).await;
 
-    // Bob не verified → Denied
     let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
     let _ = bob_chat.messages(None, 20).await.expect("messages");
 
@@ -221,14 +209,12 @@ async fn all_verified_users_requires_user_trust() {
         other => panic!("expected Server(key_denied), got {other:?}"),
     }
 
-    // Alice подписывает Bob MSK → инвалидирует кэш через sign_msk helper
     sign_msk(&alice_agent, &alice_keys, bob_uid).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
-    // Повторный запрос — Bob теперь verified
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == msg_id).expect("msg");
-    assert_eq!(msg.text, None); // всё ещё pending
+    assert_eq!(msg.text, None);
 
     let (pending, imported) = bob_chat
         .request_missing_keys()
@@ -249,8 +235,6 @@ async fn all_verified_users_requires_user_trust() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_verified_users_accepts_after_sas() {
-    // Sanity: то же поведение, но с уже существующим USK-sign (проверено в предыдущем тесте).
-    // Здесь — smoke: после setup + sign_msk Bob получает ключ.
     let alice = common::register_new("hv_avu_sas_a").await;
     let bob = common::register_new("hv_avu_sas_b").await;
 

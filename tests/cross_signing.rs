@@ -8,8 +8,6 @@ use locknet_rcab::models::{
 };
 use locknet_rcab::Event;
 
-// ---- helpers ----
-
 fn build_cross_signing_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
     let ssk_pub = keys.ssk_pub_b64();
@@ -43,8 +41,6 @@ fn build_cross_signing_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> 
         },
     }
 }
-
-// ---- tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_cross_signing_then_reupload_fails() {
@@ -135,7 +131,6 @@ async fn usk_signs_other_msk() {
         .await
         .expect("bob upload");
 
-    // Bob подписываем заранее — узнаём его MSK через query
     let b_query = alice_low
         .crypto()
         .query_cross_signing_keys(vec![b_uid])
@@ -143,7 +138,6 @@ async fn usk_signs_other_msk() {
         .expect("query bob");
     let b_msk_pub = b_query.get(&b_uid).unwrap().master_key.key.clone();
 
-    // Подписываем USK Alice'ы MSK Bob'а
     let sig = sign_b64(&a_keys.usk, &b_msk_pub).expect("sign b_msk");
 
     let mut bob_rx = bob_low.subscribe();
@@ -158,7 +152,6 @@ async fn usk_signs_other_msk() {
     assert_eq!(ack.users_updated, 1);
     assert_eq!(ack.devices_updated, 0);
 
-    // push у Bob
     let evt = common::wait_event(&mut bob_rx, |e| {
         matches!(e, Event::CrossSigningSignatureAdded(_))
     })
@@ -177,7 +170,6 @@ async fn usk_signs_other_msk() {
     assert_eq!(target, "master");
     assert_eq!(signature, sig);
 
-    // Bob queries → видит подпись Alice на своём MSK
     let result = bob_low
         .crypto()
         .query_cross_signing_keys(vec![b_uid])
@@ -219,7 +211,6 @@ async fn invalid_signature_rejected() {
         .await
         .expect("bob upload");
 
-    // Скармливаем заведомо неправильную подпись (валидная base64, но не та sig)
     let err = alice_low
         .crypto()
         .upload_signatures(Signatures {
@@ -251,7 +242,7 @@ async fn device_signature_by_own_ssk() {
         .expect("upload cs");
 
     let own_ed_b64 = {
-        let acc = alice_low.store().account();
+        let acc = alice_low.store().account().await;
         let acc = acc.lock().await;
         acc.ed25519_public_b64()
     };
@@ -335,7 +326,6 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         .await
         .expect("bob upload");
 
-    // Alice USK → Bob MSK
     let b_msk = bob_low
         .crypto()
         .query_cross_signing_keys(vec![b_uid])
@@ -356,7 +346,6 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         .await
         .expect("a signs b msk");
 
-    // Bob USK → Alice MSK
     let a_msk = alice_low
         .crypto()
         .query_cross_signing_keys(vec![a_uid])
@@ -377,7 +366,6 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         .await
         .expect("b signs a msk");
 
-    // Reset Alice с правильным паролем
     let mut bob_rx = bob_low.subscribe();
     let result = alice_low
         .crypto()
@@ -390,12 +378,10 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         result.affected_users
     );
 
-    // Bob получает push
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::CrossSigningReset(_))).await;
     let Event::CrossSigningReset(r) = evt else { unreachable!() };
     assert_eq!(r.user_id, a_uid);
 
-    // Alice: ключи удалены
     let after = alice_low
         .crypto()
         .query_cross_signing_keys(vec![a_uid])
@@ -407,7 +393,6 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         after.keys().collect::<Vec<_>>()
     );
 
-    // Bob: Alice-подписи на его MSK больше нет
     let b_after = bob_low
         .crypto()
         .query_cross_signing_keys(vec![b_uid])

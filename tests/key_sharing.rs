@@ -46,7 +46,7 @@ async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
         .expect("upload cross-signing");
 
     let own_ed = {
-        let acc = low.store().account();
+        let acc = low.store().account().await;
         let acc = acc.lock().await;
         acc.ed25519_public_b64()
     };
@@ -64,7 +64,7 @@ async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
 
 async fn upload_keys_for_low(low: &LockNetLowAgent) {
     let keys = {
-        let account = low.store().account();
+        let account = low.store().account().await;
         let mut acc = account.lock().await;
         acc.generate_one_time_keys(50);
         let otks = acc.one_time_keys_b64();
@@ -591,6 +591,12 @@ async fn key_sharing_second_device_recovers_history() {
         }
     }
     assert_eq!(imported, 1);
+
+    // Фикс: key_request теперь передаёт group_data — у Bob2 должна появиться policy
+    assert!(
+        bob2_low.store().group_data_state(group_id).await.is_some(),
+        "Bob2 должен получить group_data через key_request"
+    );
 
     let pt = bob2_low.megolm().decrypt(group_id, &enc).await.unwrap().unwrap();
     assert_eq!(pt, "for history");
