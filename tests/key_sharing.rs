@@ -554,7 +554,7 @@ async fn key_sharing_second_device_recovers_history() {
         .expect("alice wait_request");
     assert_eq!(incoming.transaction_id, txid);
 
-    let alice_session_key = alice_low.megolm().ensure_session(group_id).await.expect("ensure");
+    let (alice_session_key, _) = alice_low.megolm().ensure_session(group_id).await.expect("ensure");
     assert_eq!(alice_session_key.megolm_session_id, info.megolm_session_id);
 
     alice_low

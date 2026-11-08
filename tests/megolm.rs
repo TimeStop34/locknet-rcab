@@ -260,8 +260,8 @@ async fn megolm_ensure_session_idempotent() {
     let alice_low = alice.low();
     let group_id = common::setup_group_with_two(&alice, &bob, "MegolmEns").await;
 
-    let s1 = alice_low.megolm().ensure_session(group_id).await.expect("ensure 1");
-    let s2 = alice_low.megolm().ensure_session(group_id).await.expect("ensure 2");
+    let (s1, _) = alice_low.megolm().ensure_session(group_id).await.expect("ensure 1");
+    let (s2, _) = alice_low.megolm().ensure_session(group_id).await.expect("ensure 2");
     assert_eq!(s1.megolm_session_id, s2.megolm_session_id);
     assert_eq!(s1.session_key, s2.session_key);
 

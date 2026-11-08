@@ -36,13 +36,6 @@ async fn group_session_id(session: &Arc<tokio::sync::Mutex<vodozemac::megolm::Gr
     s.session_id()
 }
 
-async fn inbound_group_session_id(
-    session: &Arc<tokio::sync::Mutex<vodozemac::megolm::InboundGroupSession>>,
-) -> String {
-    let s = session.lock().await;
-    s.session_id()
-}
-
 // ============ 1. Открытие / схема ============
 
 #[tokio::test]

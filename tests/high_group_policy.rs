@@ -81,7 +81,7 @@ async fn non_creator_cannot_send_without_policy() {
     }
 
     let alice_low = alice_agent.low();
-    let info = alice_low
+    let (info, _rotated) = alice_low
         .megolm()
         .ensure_session(group_id)
         .await
