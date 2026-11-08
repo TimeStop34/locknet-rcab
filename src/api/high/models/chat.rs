@@ -132,6 +132,67 @@ impl Chat {
         Ok(())
     }
 
+    /// Fan-out актуального megolm-ключа, если:
+    /// - произошла auto-rotation (`was_rotated = true`)
+    /// - покрытие изменилось (другой session_id или другой member_count)
+    ///
+    /// Обновляет `ChatInner::coverage` после успешного fan-out.
+    async fn ensure_fanout(
+        &self,
+        info: &crate::api::low::helpers::megolm::MegolmSessionInfo,
+        was_rotated: bool,
+    ) -> Result<()> {
+        let chat_id = self.id();
+        let low = &self.inner.low;
+
+        let need_fanout = was_rotated || {
+            let guard = self.inner.coverage.read().await;
+            match &*guard {
+                Some((sid, cnt)) => {
+                    sid != &info.megolm_session_id || *cnt != self.inner.group.member_count
+                }
+                None => true,
+            }
+        };
+
+        if !need_fanout {
+            return Ok(());
+        }
+
+        let fresh = low.groups().info(chat_id).await.ok();
+        let (participant_ids, member_count): (Vec<i64>, usize) =
+            match fresh.as_ref().and_then(|g| g.members.as_ref()) {
+                Some(list) => (list.iter().map(|m| m.user_id).collect(), list.len()),
+                None => (
+                    self.inner.group.members.iter().map(|m| m.user.id).collect(),
+                    self.inner.group.member_count,
+                ),
+            };
+
+        if !participant_ids.is_empty() {
+            let policy = low
+                .store()
+                .group_data_state(chat_id)
+                .await
+                .map(|s| s.data.megolm_rotation_visibility)
+                .unwrap_or(crate::core::policies::MegolmRotationVisibility::OnlyVerifiedUsers);
+            crate::api::high::group_key::fan_out_group_key(
+                low,
+                chat_id,
+                &participant_ids,
+                info,
+                policy,
+                &self.inner.security,
+            )
+            .await?;
+        }
+
+        *self.inner.coverage.write().await =
+            Some((info.megolm_session_id.clone(), member_count));
+
+        Ok(())
+    }
+
     pub async fn send(&self, text: impl Into<String>) -> Result<Message> {
         let text = text.into();
         let chat_id = self.id();
@@ -140,44 +201,10 @@ impl Chat {
         let encrypted = if self.is_encrypted() {
             self.ensure_policy_known().await?;
 
-            let info = low.megolm().ensure_session(chat_id).await?;
+            let (info, was_rotated) = low.megolm().ensure_session(chat_id).await?;
 
             self.sync_policy_to_server().await?;
-
-            let need_fanout = {
-                let guard = self.inner.coverage.read().await;
-                match &*guard {
-                    Some((sid, cnt)) => {
-                        sid != &info.megolm_session_id || *cnt != self.inner.group.member_count
-                    }
-                    None => true,
-                }
-            };
-
-            if need_fanout {
-                let fresh = low.groups().info(chat_id).await.ok();
-                let (participant_ids, member_count): (Vec<i64>, usize) =
-                    match fresh.as_ref().and_then(|g| g.members.as_ref()) {
-                        Some(list) => (list.iter().map(|m| m.user_id).collect(), list.len()),
-                        None => (
-                            self.inner.group.members.iter().map(|m| m.user.id).collect(),
-                            self.inner.group.member_count,
-                        ),
-                    };
-                if !participant_ids.is_empty() {
-                    let policy = low
-                        .store()
-                        .group_data_state(chat_id)
-                        .await
-                        .map(|s| s.data.megolm_rotation_visibility)
-                        .unwrap_or(crate::core::policies::MegolmRotationVisibility::OnlyVerifiedUsers);
-                    crate::api::high::group_key::fan_out_group_key(
-                        &low, chat_id, &participant_ids, &info, policy, &self.inner.security,
-                    ).await?;
-                }
-                *self.inner.coverage.write().await =
-                    Some((info.megolm_session_id.clone(), member_count));
-            }
+            self.ensure_fanout(&info, was_rotated).await?;
 
             low.megolm().encrypt(chat_id, &text).await?
         } else {
@@ -364,7 +391,11 @@ impl Chat {
         let new_text = new_text.into();
         let encrypted = if self.is_encrypted() {
             self.ensure_policy_known().await?;
-            low.megolm().ensure_session(chat_id).await?;
+            let (info, was_rotated) = low.megolm().ensure_session(chat_id).await?;
+            if was_rotated {
+                self.sync_policy_to_server().await?;
+                self.ensure_fanout(&info, true).await?;
+            }
             low.megolm().encrypt(chat_id, &new_text).await?
         } else {
             Encrypted {

@@ -509,3 +509,135 @@ async fn olm_session_survives_literal_restart() {
         bob.disconnect().await.ok();
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn megolm_rotation_meta_survives_literal_restart() {
+    let (_adir, alice_db) = tmp_db();
+    let (_bdir, bob_db) = tmp_db();
+    let pw = "pw";
+
+    let (alice_rjwt, bob_rjwt, group_id, s1) = {
+        let mut alice_cfg = common::test_config();
+        alice_cfg.megolm_rotation_message_count = 100; // не триггерим
+        alice_cfg.megolm_rotation_ttl_secs = 0;        // не триггерим
+        let mut alice = {
+            let store = Arc::new(SqliteStore::open(&alice_db, pw).expect("sqlite open"));
+            LockNetClient::with_store(alice_cfg, store)
+        };
+        let a_sess = alice
+            .connection_request(Credentials::Register {
+                username: format!("rot_meta_a_{}", common::unique_suffix()),
+                password: "pw".into(),
+                display_name: None,
+            })
+            .await
+            .expect("alice reg");
+
+        let mut bob = sqlite_client(&bob_db, pw);
+        let b_sess = bob
+            .connection_request(Credentials::Register {
+                username: format!("rot_meta_b_{}", common::unique_suffix()),
+                password: "pw".into(),
+                display_name: None,
+            })
+            .await
+            .expect("bob reg");
+
+        let alice_low = alice.get_low_agent().expect("alice low");
+        let bob_low = bob.get_low_agent().expect("bob low");
+
+        let group = alice_low
+            .groups()
+            .create("RotMeta", false, None, vec![b_sess.user_id])
+            .await
+            .expect("create");
+        let gid = group.id;
+
+        let bob_inv = bob_low
+            .groups()
+            .invites()
+            .await
+            .expect("inv")
+            .into_iter()
+            .find(|i| i.group_id == gid)
+            .expect("bob inv");
+        bob_low
+            .groups()
+            .accept_invite(bob_inv.id)
+            .await
+            .expect("accept");
+
+        // Создаём сессию и шлём 3 сообщения (meta.messages_sent = 3)
+        let info = alice_low.megolm().create(gid).await.expect("create mg");
+        let s1 = info.megolm_session_id.clone();
+
+        for i in 0..3 {
+            alice_low
+                .megolm()
+                .encrypt(gid, &format!("m{i}"))
+                .await
+                .expect("encrypt");
+        }
+
+        // Sanity: meta существует, messages_sent = 3
+        let meta = alice_low
+            .store()
+            .megolm_outbound_meta(gid)
+            .await
+            .expect("meta");
+        assert_eq!(meta.messages_sent, 3, "3 messages before restart");
+        assert_eq!(meta.session_id, s1);
+
+        alice.disconnect().await.ok();
+        bob.disconnect().await.ok();
+
+        (a_sess.rjwt, b_sess.rjwt, gid, s1)
+    };
+
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    {
+        let mut alice_cfg = common::test_config();
+        alice_cfg.megolm_rotation_message_count = 100;
+        alice_cfg.megolm_rotation_ttl_secs = 0;
+        let mut alice = {
+            let store = Arc::new(SqliteStore::open(&alice_db, pw).expect("sqlite reopen"));
+            LockNetClient::with_store(alice_cfg, store)
+        };
+        alice
+            .connection_request(Credentials::Session {
+                refresh_jwt: alice_rjwt,
+            })
+            .await
+            .expect("alice reconnect");
+        let mut bob = sqlite_client(&bob_db, pw);
+        bob.connection_request(Credentials::Session {
+            refresh_jwt: bob_rjwt,
+        })
+        .await
+        .expect("bob reconnect");
+
+        let alice_low = alice.get_low_agent().expect("alice low 2");
+
+        // Meta должна пережить restart: messages_sent = 3, session_id = s1
+        let meta_after = alice_low
+            .store()
+            .megolm_outbound_meta(group_id)
+            .await
+            .expect("meta after restart");
+        assert_eq!(meta_after.messages_sent, 3, "counter preserved");
+        assert_eq!(meta_after.session_id, s1, "session_id preserved");
+
+        // ensure_session не должен ротировать (count=100, ttl=0)
+        let (info, rotated) = alice_low
+            .megolm()
+            .ensure_session(group_id)
+            .await
+            .expect("ensure");
+        assert!(!rotated, "no rotation after restart with count=100");
+        assert_eq!(info.megolm_session_id, s1);
+
+        alice.disconnect().await.ok();
+        bob.disconnect().await.ok();
+    }
+}

@@ -19,6 +19,14 @@ pub struct LockNetConfig {
     pub default_history_visibility: HistoryVisibility,
     /// Fallback-политика, если сервер не отдал `Group.megolm_rotation_visibility`.
     pub default_megolm_rotation_visibility: MegolmRotationVisibility,
+
+    /// Ротировать Megolm outbound после N отправленных сообщений.
+    /// `0` = отключить (никогда не ротировать по счётчику).
+    pub megolm_rotation_message_count: u64,
+    /// Ротировать Megolm outbound раз в N секунд с момента создания.
+    /// `0` = отключить (никогда не ротировать по TTL).
+    /// По умолчанию 7 дней = 7 * 24 * 3600.
+    pub megolm_rotation_ttl_secs: u64,
 }
 
 impl LockNetConfig {
@@ -36,6 +44,8 @@ impl LockNetConfig {
             accept_invalid_certs: true,
             default_history_visibility: HistoryVisibility::default(),
             default_megolm_rotation_visibility: MegolmRotationVisibility::default(),
+            megolm_rotation_message_count: 100,
+            megolm_rotation_ttl_secs: 7 * 24 * 3600,
         })
     }
 

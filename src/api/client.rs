@@ -147,6 +147,8 @@ impl LockNetClient {
             self.store.clone(),
             self.config.default_history_visibility,
             self.config.default_megolm_rotation_visibility,
+            self.config.megolm_rotation_message_count,
+            self.config.megolm_rotation_ttl_secs,
         ));
 
         if is_fresh {

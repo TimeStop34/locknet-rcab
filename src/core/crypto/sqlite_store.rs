@@ -15,9 +15,9 @@ use crate::core::crypto::signature::CrossSigningKeysPrivate;
 use crate::core::crypto::store::{CryptoStore, MAX_OLM_SESSIONS_PER_PEER};
 use crate::core::crypto::{Account, OlmSessionEntry};
 use crate::core::errors::{LockNetError, Result};
-use crate::core::policies::{GroupData, GroupDataState};
+use crate::core::policies::{GroupData, GroupDataState, MegolmOutboundMeta};
 
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Постоянное хранилище криптосостояния клиента в SQLite с шифрованием SQLCipher.
 ///
@@ -116,6 +116,23 @@ impl SqliteStore {
 
             conn.pragma_update(None, "user_version", SCHEMA_VERSION)
                 .map_err(|e| LockNetError::InvalidResponse(format!("set user_version: {e}")))?;
+        }
+
+        if v < 2 {
+            conn.execute_batch(
+                r#"
+                CREATE TABLE megolm_outbound_meta (
+                    chat_id INTEGER PRIMARY KEY,
+                    session_id TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    messages_sent INTEGER NOT NULL
+                );
+                "#,
+            )
+            .map_err(|e| LockNetError::InvalidResponse(format!("create v2 schema: {e}")))?;
+
+            conn.pragma_update(None, "user_version", 2)
+                .map_err(|e| LockNetError::InvalidResponse(format!("set user_version 2: {e}")))?;
         }
 
         Ok(())
@@ -491,6 +508,49 @@ impl CryptoStore for SqliteStore {
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "DELETE FROM group_data_state WHERE chat_id = ?1",
+                [chat_id],
+            );
+        }
+    }
+
+    async fn megolm_outbound_meta(&self, chat_id: i64) -> Option<MegolmOutboundMeta> {
+        let conn = self.conn.lock().ok()?;
+        let row: Option<(String, String, i64)> = conn
+            .query_row(
+                "SELECT session_id, created_at, messages_sent \
+                 FROM megolm_outbound_meta WHERE chat_id = ?1",
+                [chat_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()
+            .ok()?;
+        let (session_id, created_at_str, messages_sent) = row?;
+        let created_at = chrono::DateTime::parse_from_rfc3339(&created_at_str)
+            .ok()?
+            .with_timezone(&chrono::Utc);
+        Some(MegolmOutboundMeta {
+            session_id,
+            created_at,
+            messages_sent: messages_sent as u64,
+        })
+    }
+
+    async fn megolm_outbound_meta_put(&self, chat_id: i64, meta: MegolmOutboundMeta) {
+        let created_at = meta.created_at.to_rfc3339();
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "INSERT OR REPLACE INTO megolm_outbound_meta \
+                 (chat_id, session_id, created_at, messages_sent) \
+                 VALUES (?1, ?2, ?3, ?4)",
+                params![chat_id, meta.session_id, created_at, meta.messages_sent as i64],
+            );
+        }
+    }
+
+    async fn megolm_outbound_meta_remove(&self, chat_id: i64) {
+        if let Ok(conn) = self.conn.lock() {
+            let _ = conn.execute(
+                "DELETE FROM megolm_outbound_meta WHERE chat_id = ?1",
                 [chat_id],
             );
         }

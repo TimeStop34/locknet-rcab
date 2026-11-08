@@ -53,3 +53,15 @@ pub struct GroupDataState {
     /// в `group_key` payload уходит в `content.group_data`.
     pub blob: String,
 }
+
+/// Метаданные для auto-rotation Megolm outbound.
+///
+/// Хранятся в `CryptoStore` параллельно с самим `GroupSession`.
+/// `ensure_session` проверяет `messages_sent >= count || now - created_at >= ttl`
+/// и ротирует сессию, если порог превышен.
+#[derive(Debug, Clone)]
+pub struct MegolmOutboundMeta {
+    pub session_id: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub messages_sent: u64,
+}

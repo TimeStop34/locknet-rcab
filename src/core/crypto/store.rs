@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use vodozemac::megolm::{GroupSession, InboundGroupSession};
 
-use crate::core::policies::GroupDataState;
+use crate::core::policies::{GroupDataState, MegolmOutboundMeta};
 use super::account::Account;
 use super::olm::OlmSessionEntry;
 use super::signature::CrossSigningKeysPrivate;
@@ -74,6 +74,12 @@ pub trait CryptoStore: Send + Sync {
     async fn group_data_state_put(&self, chat_id: i64, state: GroupDataState);
     async fn group_data_state_remove(&self, chat_id: i64);
 
+    // ---- Megolm outbound meta (для auto-rotation) ----
+
+    async fn megolm_outbound_meta(&self, chat_id: i64) -> Option<MegolmOutboundMeta>;
+    async fn megolm_outbound_meta_put(&self, chat_id: i64, meta: MegolmOutboundMeta);
+    async fn megolm_outbound_meta_remove(&self, chat_id: i64);
+
     /// Persist any mutations made to the `Account` returned by `account()`.
     ///
     /// `InMemoryStore` — no-op (всё и так в памяти до завершения процесса).
@@ -106,6 +112,7 @@ pub struct InMemoryStore {
     megolm_in: Arc<Mutex<HashMap<(i64, String), Arc<Mutex<InboundGroupSession>>>>>,
     cross_signing: Arc<Mutex<Option<Arc<CrossSigningKeysPrivate>>>>,
     group_data: Arc<Mutex<HashMap<i64, GroupDataState>>>,
+    megolm_out_meta: Arc<Mutex<HashMap<i64, MegolmOutboundMeta>>>,
 }
 
 impl InMemoryStore {
@@ -117,6 +124,7 @@ impl InMemoryStore {
             megolm_in: Arc::new(Mutex::new(HashMap::new())),
             cross_signing: Arc::new(Mutex::new(None)),
             group_data: Arc::new(Mutex::new(HashMap::new())),
+            megolm_out_meta: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 }
@@ -228,6 +236,18 @@ impl CryptoStore for InMemoryStore {
 
     async fn group_data_state_remove(&self, chat_id: i64) {
         self.group_data.lock().await.remove(&chat_id);
+    }
+
+    async fn megolm_outbound_meta(&self, chat_id: i64) -> Option<MegolmOutboundMeta> {
+        self.megolm_out_meta.lock().await.get(&chat_id).cloned()
+    }
+
+    async fn megolm_outbound_meta_put(&self, chat_id: i64, meta: MegolmOutboundMeta) {
+        self.megolm_out_meta.lock().await.insert(chat_id, meta);
+    }
+
+    async fn megolm_outbound_meta_remove(&self, chat_id: i64) {
+        self.megolm_out_meta.lock().await.remove(&chat_id);
     }
 
     async fn olm_persist(&self, _peer_session_id: i64, _entries: &[OlmSessionEntry]) {

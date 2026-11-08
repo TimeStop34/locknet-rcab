@@ -6,9 +6,14 @@ use crate::api::low::models::Encrypted;
 use crate::core::crypto::megolm::{create_outbound, decrypt_inbound, encrypt, import_inbound, session_id, MEGOLM_ALGORITHM};
 use crate::core::crypto::CryptoStore;
 use crate::core::errors::{LockNetError, Result};
+use crate::core::policies::MegolmOutboundMeta;
 use crate::api::low::helpers::olm::LockNetOlmHelper;
 
-pub struct MegolmSessionInfo { pub chat_id: i64, pub megolm_session_id: String, pub session_key: String }
+pub struct MegolmSessionInfo {
+    pub chat_id: i64,
+    pub megolm_session_id: String,
+    pub session_key: String,
+}
 
 pub struct LockNetMegolmHelper {
     #[allow(dead_code)]
@@ -18,6 +23,8 @@ pub struct LockNetMegolmHelper {
     pub(crate) session_id: i64,
     pub(crate) default_history_visibility: crate::core::policies::HistoryVisibility,
     pub(crate) default_megolm_rotation_visibility: crate::core::policies::MegolmRotationVisibility,
+    pub(crate) rotation_message_count: u64,
+    pub(crate) rotation_ttl_secs: u64,
 }
 
 impl LockNetMegolmHelper {
@@ -65,6 +72,16 @@ impl LockNetMegolmHelper {
         let inbound = import_inbound(&key)?;
         self.store.megolm_inbound_put(chat_id, sid.clone(), Arc::new(Mutex::new(inbound))).await;
 
+        // Метаданные для auto-rotation
+        self.store.megolm_outbound_meta_put(
+            chat_id,
+            MegolmOutboundMeta {
+                session_id: sid.clone(),
+                created_at: chrono::Utc::now(),
+                messages_sent: 0,
+            },
+        ).await;
+
         Ok(MegolmSessionInfo {
             chat_id,
             megolm_session_id: sid,
@@ -72,18 +89,60 @@ impl LockNetMegolmHelper {
         })
     }
 
-    pub async fn ensure_session(&self, chat_id: i64) -> Result<MegolmSessionInfo> {
-        if let (Some(session), Some(key)) = (
-            self.store.megolm_outbound(chat_id).await,
-            self.store.megolm_outbound_key(chat_id).await,
-        ) {
+    /// Возвращает `(info, was_rotated)`.
+    ///
+    /// `was_rotated = true` — только что произошла auto-rotation по TTL или
+    /// счётчику. Caller (`Chat::send`) должен сделать fan-out нового ключа
+    /// и sync policy blob на сервер.
+    ///
+    /// `was_rotated = false` — сессия та же, fan-out не нужен (если только
+    /// состав не изменился — за это отвечает `Chat::coverage`).
+    pub async fn ensure_session(&self, chat_id: i64) -> Result<(MegolmSessionInfo, bool)> {
+        let existing = self.store.megolm_outbound(chat_id).await;
+        let existing_key = self.store.megolm_outbound_key(chat_id).await;
+        let meta = self.store.megolm_outbound_meta(chat_id).await;
+
+        if let (Some(session), Some(key), Some(meta)) = (existing, existing_key, meta) {
             let sid = { let s = session.lock().await; session_id(&s) };
-            return Ok(MegolmSessionInfo { chat_id, megolm_session_id: sid, session_key: key });
+
+            let now = chrono::Utc::now();
+            let age = now.signed_duration_since(meta.created_at);
+            let ttl_expired = self.rotation_ttl_secs > 0
+                && age.num_seconds() as u64 >= self.rotation_ttl_secs;
+            let count_exceeded = self.rotation_message_count > 0
+                && meta.messages_sent >= self.rotation_message_count;
+
+            if ttl_expired || count_exceeded {
+                tracing::info!(
+                    chat_id,
+                    age_secs = age.num_seconds(),
+                    messages_sent = meta.messages_sent,
+                    ttl_expired,
+                    count_exceeded,
+                    "megolm auto-rotation triggered"
+                );
+                let info = self.create(chat_id).await?;
+                return Ok((info, true));
+            }
+
+            return Ok((
+                MegolmSessionInfo {
+                    chat_id,
+                    megolm_session_id: sid,
+                    session_key: key,
+                },
+                false,
+            ));
         }
-        self.create(chat_id).await
+
+        // Нет outbound — создаём.
+        let info = self.create(chat_id).await?;
+        Ok((info, true))
     }
 
-    pub async fn rotate(&self, chat_id: i64) -> Result<MegolmSessionInfo> { self.create(chat_id).await }
+    pub async fn rotate(&self, chat_id: i64) -> Result<MegolmSessionInfo> {
+        self.create(chat_id).await
+    }
 
     pub async fn encrypt(&self, chat_id: i64, plaintext: impl Into<String>) -> Result<Encrypted> {
         let session = self.store.megolm_outbound(chat_id).await
@@ -94,6 +153,14 @@ impl LockNetMegolmHelper {
             let ct = encrypt(&mut s, &plaintext.into());
             (sid, ct)
         };
+
+        // Инкремент счётчика для auto-rotation. Не ротируем здесь —
+        // это делает `ensure_session` (чтобы caller мог сделать fan-out).
+        if let Some(mut meta) = self.store.megolm_outbound_meta(chat_id).await {
+            meta.messages_sent = meta.messages_sent.saturating_add(1);
+            self.store.megolm_outbound_meta_put(chat_id, meta).await;
+        }
+
         Ok(Encrypted {
             algorithm: MEGOLM_ALGORITHM.into(),
             sender_key: "WILL_BE_OVERWRITTEN".into(),
@@ -120,7 +187,7 @@ impl LockNetMegolmHelper {
     }
 
     pub async fn share_group_key(&self, chat_id: i64, to_user: i64, to_session: i64) -> Result<()> {
-        let info = self.ensure_session(chat_id).await?;
+        let (info, _) = self.ensure_session(chat_id).await?;
         self.share_group_key_with_session_key(
             chat_id,
             to_user,
@@ -131,7 +198,6 @@ impl LockNetMegolmHelper {
         .await
     }
 
-    /// Fan-out (без `transaction_id` — это обычная отправка, не ответ на key_request).
     pub async fn share_group_key_with_session_key(
         &self,
         chat_id: i64,
@@ -189,11 +255,6 @@ impl LockNetMegolmHelper {
 
 // ---- shared helpers ----
 
-/// Формирует JSON-content для `ln.encryption.group_key`.
-///
-/// - Если у нас есть `group_data_state(chat_id)` — включает `group_data` (blob) и
-///   `group_data_key` (b64). Получатель расшифрует blob и получит политику.
-/// - Если передан `transaction_id` — включает его (для key_request-ответа).
 pub(crate) async fn build_group_key_content(
     store: &Arc<dyn CryptoStore>,
     chat_id: i64,
@@ -226,11 +287,6 @@ pub(crate) async fn build_group_key_content(
     content
 }
 
-/// Парсит `group_data` / `group_data_key` из content `ln.encryption.group_key`,
-/// расшифровывает и сохраняет в `CryptoStore` с anti-replay по `version`.
-///
-/// Мягкий контракт: отсутствие полей (старые сессии) — не ошибка. Битый blob
-/// или downgrade — warning, но не ошибка (ключ мегелома всё равно импортирован).
 pub(crate) async fn apply_group_data_to_store(
     store: &Arc<dyn CryptoStore>,
     chat_id: i64,

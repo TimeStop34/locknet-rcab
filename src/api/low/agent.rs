@@ -34,6 +34,8 @@ impl LockNetLowAgent {
         store: Arc<dyn CryptoStore>,
         default_history_visibility: crate::core::policies::HistoryVisibility,
         default_megolm_rotation_visibility: crate::core::policies::MegolmRotationVisibility,
+        megolm_rotation_message_count: u64,
+        megolm_rotation_ttl_secs: u64,
     ) -> Self {
         let messages_helper = Arc::new(LockNetMessagesHelper { cmd_tx: cmd_tx.clone() });
         let groups_helper = Arc::new(LockNetGroupsHelper { cmd_tx: cmd_tx.clone() });
@@ -45,6 +47,8 @@ impl LockNetLowAgent {
             cmd_tx: cmd_tx.clone(), store: store.clone(), olm: olm_helper.clone(), session_id,
             default_history_visibility,
             default_megolm_rotation_visibility,
+            rotation_message_count: megolm_rotation_message_count,
+            rotation_ttl_secs: megolm_rotation_ttl_secs,
         });
         let backup_helper = Arc::new(LockNetBackupHelper {
             cmd_tx: cmd_tx.clone(),
