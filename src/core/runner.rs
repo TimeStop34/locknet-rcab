@@ -65,7 +65,7 @@ async fn run(
         }
 
         tokio::time::sleep(backoff).await;
-        backoff = (backoff * 2).min(config.reconnect_backoff_max);
+        backoff = next_backoff(backoff, config.reconnect_backoff_max);
 
         match refresh_ajwt(&config, &http, &session).await {
             Ok(new_ajwt) => {
@@ -217,6 +217,14 @@ async fn drain_pending(pending: &Pending) {
     }
 }
 
+/// Следующий шаг экспоненциального backoff: `current * 2`, но не больше `max`.
+///
+/// Вынесено из `run` — чтобы покрыть unit-тестами (экспоненциальный рост +
+/// cap). Сами `sleep` и сетевые ошибки — интеграционный сценарий, не unit.
+pub(crate) fn next_backoff(current: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
+    (current * 2).min(max)
+}
+
 async fn refresh_ajwt(config: &LockNetConfig, http: &reqwest::Client, session: &Session) -> Result<String> {
     let rjwt = {
         let s = session.lock().await;
@@ -232,4 +240,38 @@ async fn refresh_ajwt(config: &LockNetConfig, http: &reqwest::Client, session: &
         }
     }
     Ok(resp.access_token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn backoff_doubles() {
+        let max = Duration::from_secs(60);
+        assert_eq!(next_backoff(Duration::from_secs(1), max), Duration::from_secs(2));
+        assert_eq!(next_backoff(Duration::from_secs(2), max), Duration::from_secs(4));
+        assert_eq!(next_backoff(Duration::from_secs(4), max), Duration::from_secs(8));
+    }
+
+    #[test]
+    fn backoff_caps_at_max() {
+        let max = Duration::from_secs(60);
+        assert_eq!(next_backoff(Duration::from_secs(40), max), Duration::from_secs(60));
+        assert_eq!(next_backoff(Duration::from_secs(60), max), Duration::from_secs(60));
+        assert_eq!(next_backoff(Duration::from_secs(120), max), Duration::from_secs(60));
+    }
+
+    #[test]
+    fn backoff_with_zero_current_is_zero() {
+        let max = Duration::from_secs(60);
+        assert_eq!(next_backoff(Duration::ZERO, max), Duration::ZERO);
+    }
+
+    #[test]
+    fn backoff_with_max_zero() {
+        let max = Duration::ZERO;
+        assert_eq!(next_backoff(Duration::from_secs(5), max), Duration::ZERO);
+    }
 }
