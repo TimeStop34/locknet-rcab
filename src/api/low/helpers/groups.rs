@@ -1,10 +1,9 @@
 use serde_json::json;
-use tokio::sync::mpsc;
-use crate::api::low::command::{dispatch, dispatch_unit, Cmd};
+use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
 
-pub struct LockNetGroupsHelper { pub(crate) cmd_tx: mpsc::Sender<Cmd> }
+pub struct LockNetGroupsHelper { pub(crate) cmd_tx: CmdSender }
 
 impl LockNetGroupsHelper {
     pub async fn create(&self, name: impl Into<String>, is_public: bool, public_id: Option<String>, participant_ids: Vec<i64>) -> Result<Group> {

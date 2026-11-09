@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use serde_json::json;
-use tokio::sync::{mpsc, Mutex};
-use crate::api::low::command::Cmd;
+use tokio::sync::Mutex;
+use crate::api::low::command::CmdSender;
 use crate::api::low::models::Encrypted;
 use crate::core::crypto::megolm::{create_outbound, decrypt_inbound, encrypt, import_inbound, session_id, MEGOLM_ALGORITHM};
 use crate::core::crypto::CryptoStore;
@@ -17,7 +17,7 @@ pub struct MegolmSessionInfo {
 
 pub struct LockNetMegolmHelper {
     #[allow(dead_code)]
-    pub(crate) cmd_tx: mpsc::Sender<Cmd>,
+    pub(crate) cmd_tx: CmdSender,
     pub(crate) store: Arc<dyn CryptoStore>,
     pub(crate) olm: Arc<LockNetOlmHelper>,
     pub(crate) session_id: i64,

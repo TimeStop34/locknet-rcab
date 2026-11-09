@@ -5,11 +5,10 @@ use base64::Engine;
 use hkdf::Hkdf;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use tokio::sync::mpsc;
 use crypto_secretbox::aead::{generic_array::GenericArray, Aead};
 use crypto_secretbox::{KeyInit, XSalsa20Poly1305};
 
-use crate::api::low::command::{dispatch, dispatch_unit, Cmd};
+use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::helpers::megolm::LockNetMegolmHelper;
 use crate::api::low::models::*;
 use crate::core::crypto::CryptoStore;
@@ -82,7 +81,7 @@ pub struct BackupImportResult {
 // ---- Helper ----
 
 pub struct LockNetBackupHelper {
-    pub(crate) cmd_tx: mpsc::Sender<Cmd>,
+    pub(crate) cmd_tx: CmdSender,
     pub(crate) store: Arc<dyn CryptoStore>,
     pub(crate) megolm: Arc<LockNetMegolmHelper>,
 }

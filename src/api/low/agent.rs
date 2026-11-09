@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
-use crate::api::low::command::Cmd;
+use tokio::sync::broadcast;
+use crate::api::low::command::CmdSender;
 use crate::api::low::event::Event;
 use crate::api::low::helpers::*;
 use crate::core::crypto::CryptoStore;
@@ -9,7 +9,7 @@ pub struct LockNetLowAgent {
     user_id: i64,
     session_id: i64,
     #[allow(dead_code)]
-    cmd_tx: mpsc::Sender<Cmd>,
+    cmd_tx: CmdSender,
     event_tx: broadcast::Sender<Event>,
     store: Arc<dyn CryptoStore>,
 
@@ -29,7 +29,7 @@ impl LockNetLowAgent {
     pub(crate) fn new(
         user_id: i64,
         session_id: i64,
-        cmd_tx: mpsc::Sender<Cmd>,
+        cmd_tx: CmdSender,
         event_tx: broadcast::Sender<Event>,
         store: Arc<dyn CryptoStore>,
         default_history_visibility: crate::core::policies::HistoryVisibility,

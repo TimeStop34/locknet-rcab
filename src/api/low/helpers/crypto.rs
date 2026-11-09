@@ -1,10 +1,9 @@
 use serde_json::json;
-use tokio::sync::mpsc;
-use crate::api::low::command::{dispatch, dispatch_unit, Cmd};
+use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
 
-pub struct LockNetCryptoHelper { pub(crate) cmd_tx: mpsc::Sender<Cmd> }
+pub struct LockNetCryptoHelper { pub(crate) cmd_tx: CmdSender }
 
 impl LockNetCryptoHelper {
     pub async fn upload_cross_signing_keys(&self, keys: CrossSigningKeys) -> Result<()> {

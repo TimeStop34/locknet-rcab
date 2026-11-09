@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use serde_json::json;
-use tokio::sync::mpsc;
-use crate::api::low::command::{dispatch, Cmd};
+use crate::api::low::command::{dispatch, CmdSender};
 use crate::api::low::models::{Otk, QueryKeysResult, ToDevicePayload};
 use crate::core::crypto::olm::{
     create_inbound, create_outbound, curve_from_b64, decrypt_olm, encrypt_olm, parse_prekey,
@@ -11,7 +10,7 @@ use crate::core::crypto::CryptoStore;
 use crate::core::errors::{LockNetError, Result};
 use crate::core::flow::SimpleFlow;
 
-pub struct LockNetOlmHelper { pub(crate) cmd_tx: mpsc::Sender<Cmd>, pub(crate) store: Arc<dyn CryptoStore> }
+pub struct LockNetOlmHelper { pub(crate) cmd_tx: CmdSender, pub(crate) store: Arc<dyn CryptoStore> }
 
 impl LockNetOlmHelper {
     pub fn send(&self, to_user_id: i64, to_session_id: i64, plaintext: impl Into<String> + Send + 'static) -> SimpleFlow<()> {
@@ -26,7 +25,7 @@ impl LockNetOlmHelper {
     }
 }
 
-async fn send_impl(cmd_tx: mpsc::Sender<Cmd>, store: Arc<dyn CryptoStore>, to_user_id: i64, to_session_id: i64, plaintext: String) -> Result<()> {
+async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i64, to_session_id: i64, plaintext: String) -> Result<()> {
     let entries = store.olm_sessions(to_session_id).await;
 
     // 1. Established-first: сессии, которые уже получали сообщения,
@@ -93,7 +92,7 @@ async fn send_impl(cmd_tx: mpsc::Sender<Cmd>, store: Arc<dyn CryptoStore>, to_us
     Ok(())
 }
 
-async fn send_to_device(cmd_tx: &mpsc::Sender<Cmd>, to_user_id: i64, to_session_id: i64, their_curve: &str, encrypted: &EncryptedOlm) -> Result<()> {
+async fn send_to_device(cmd_tx: &CmdSender, to_user_id: i64, to_session_id: i64, their_curve: &str, encrypted: &EncryptedOlm) -> Result<()> {
     let payload = json!({
         "algorithm": OLM_ALGORITHM,
         "sender_key": "WILL_BE_OVERWRITTEN",

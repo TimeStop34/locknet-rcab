@@ -8,7 +8,7 @@ use tokio::task::JoinHandle;
 
 use crate::api::high::agent::LockNetAgent;
 use crate::api::low::agent::LockNetLowAgent;
-use crate::api::low::command::{dispatch, Cmd};
+use crate::api::low::command::{dispatch, Cmd, CmdSender};
 use crate::api::low::event::Event;
 use crate::api::session::{Credentials, LockNetSessionContext};
 use crate::core::config::LockNetConfig;
@@ -99,7 +99,8 @@ impl LockNetClient {
             }
         };
 
-        let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(256);
+        let (raw_cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(256);
+        let cmd_tx = CmdSender::new(raw_cmd_tx.clone(), self.config.request_timeout);
         let (auth_ok_tx, auth_ok_rx) = tokio::sync::oneshot::channel::<Result<i64>>();
 
         let join = crate::core::runner::spawn(
@@ -116,12 +117,12 @@ impl LockNetClient {
             Ok(Ok(sid)) if sid != 0 => sid,
             Ok(Ok(_)) => {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
+                let _ = raw_cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
                 return Err(LockNetError::InvalidResponse("server did not return session_id in auth_ok".into()));
             }
             Ok(Err(e)) => {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
+                let _ = raw_cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
                 return Err(e);
             }
             Err(_) => return Err(LockNetError::RunnerDown),
@@ -174,7 +175,7 @@ impl LockNetClient {
 
             if let Err(e) = upload {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
-                let _ = cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
+                let _ = raw_cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
                 *self.session.lock().await = None;
                 return Err(e);
             }
@@ -184,7 +185,7 @@ impl LockNetClient {
             let _ = low_agent.events().sync_until_empty(100).await;
         }
 
-        self.runner = Some(RunnerHandle { shutdown: cmd_tx, join });
+        self.runner = Some(RunnerHandle { shutdown: raw_cmd_tx, join });
         self.low_agent = Some(low_agent);
 
         Ok(ctx)

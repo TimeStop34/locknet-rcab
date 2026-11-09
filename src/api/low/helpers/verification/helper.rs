@@ -1,6 +1,6 @@
 use std::sync::Arc;
-use tokio::sync::{broadcast, mpsc};
-use crate::api::low::command::Cmd;
+use tokio::sync::broadcast;
+use crate::api::low::command::CmdSender;
 use crate::api::low::event::Event;
 use crate::api::low::helpers::olm::LockNetOlmHelper;
 use crate::api::low::helpers::verification::sas::SasFlow;
@@ -9,7 +9,7 @@ use crate::core::errors::Result;
 
 pub struct LockNetVerificationHelper {
     #[allow(dead_code)]
-    pub(crate) cmd_tx: mpsc::Sender<Cmd>,
+    pub(crate) cmd_tx: CmdSender,
     pub(crate) store: Arc<dyn CryptoStore>,
     pub(crate) event_tx: broadcast::Sender<Event>,
     pub(crate) olm: Arc<LockNetOlmHelper>,

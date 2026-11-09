@@ -1,10 +1,9 @@
 use serde_json::json;
-use tokio::sync::mpsc;
-use crate::api::low::command::{dispatch, Cmd};
+use crate::api::low::command::{dispatch, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
 
-pub struct LockNetKeysHelper { pub(crate) cmd_tx: mpsc::Sender<Cmd> }
+pub struct LockNetKeysHelper { pub(crate) cmd_tx: CmdSender }
 
 impl LockNetKeysHelper {
     pub async fn upload(&self, keys: DeviceKeys) -> Result<OtkCounts> {
