@@ -44,10 +44,6 @@ impl CmdSender {
     pub(crate) fn new(tx: mpsc::Sender<Cmd>, timeout: Duration) -> Self {
         Self { tx, timeout }
     }
-
-    pub(crate) fn timeout(&self) -> Duration {
-        self.timeout
-    }
 }
 
 /// Отправляет `payload` в runner и ждёт ответ с таймаутом.
