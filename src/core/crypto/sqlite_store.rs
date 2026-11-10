@@ -19,9 +19,6 @@ use crate::core::policies::{GroupData, GroupDataState, MegolmOutboundMeta};
 
 const SCHEMA_VERSION: i64 = 2;
 
-/// Постоянное хранилище криптосостояния клиента в SQLite с шифрованием SQLCipher.
-///
-/// Схема версионируется через `PRAGMA user_version`. Сейчас v1.
 pub struct SqliteStore {
     conn: Arc<StdMutex<Connection>>,
     account_cache: OnceCell<Arc<Mutex<Account>>>,
@@ -164,7 +161,6 @@ impl Drop for SqliteStore {
     }
 }
 
-// ---- helpers для vodozemac 0.8 ----
 
 fn olm_account_from_pickle_bytes(bytes: &[u8]) -> Option<OlmAccount> {
     let pickle: AccountPickle = serde_json::from_slice(bytes).ok()?;
@@ -186,7 +182,6 @@ fn inbound_group_session_from_pickle_bytes(bytes: &[u8]) -> Option<InboundGroupS
     Some(InboundGroupSession::from_pickle(pickle))
 }
 
-/// Сериализуемый контейнер для трёх cross-signing ключей.
 #[derive(Serialize, Deserialize)]
 struct CrossSigningPickle {
     msk: Ed25519Keypair,
@@ -232,7 +227,6 @@ impl CryptoStore for SqliteStore {
         }
     }
 
-    // ---- Olm sessions ----
 
     async fn olm_sessions(&self, peer_session_id: i64) -> Vec<OlmSessionEntry> {
         let conn = match self.conn.lock() {
@@ -325,7 +319,6 @@ impl CryptoStore for SqliteStore {
         }
     }
 
-    // ---- Megolm outbound ----
 
     async fn megolm_outbound(&self, chat_id: i64) -> Option<Arc<Mutex<GroupSession>>> {
         let conn = self.conn.lock().ok()?;
@@ -374,7 +367,6 @@ impl CryptoStore for SqliteStore {
         }
     }
 
-    // ---- Megolm inbound ----
 
     async fn megolm_inbound(
         &self,
@@ -430,7 +422,6 @@ impl CryptoStore for SqliteStore {
             .unwrap_or_default()
     }
 
-    // ---- Cross-signing keys ----
 
     async fn cross_signing_keys(&self) -> Option<Arc<CrossSigningKeysPrivate>> {
         let conn = self.conn.lock().ok()?;
@@ -468,7 +459,6 @@ impl CryptoStore for SqliteStore {
         }
     }
 
-    // ---- Group policy state ----
 
     async fn group_data_state(&self, chat_id: i64) -> Option<GroupDataState> {
         let conn = self.conn.lock().ok()?;
@@ -557,7 +547,6 @@ impl CryptoStore for SqliteStore {
     }
 
     async fn olm_persist(&self, peer_session_id: i64, entries: &[OlmSessionEntry]) {
-        // Собираем pickle заранее (без держания conn lock через .await).
         let mut prepared: Vec<(i64, Vec<u8>, String)> = Vec::with_capacity(entries.len());
         for (idx, entry) in entries.iter().enumerate() {
             let s = entry.session.lock().await;

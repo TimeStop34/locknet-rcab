@@ -17,14 +17,12 @@ use crate::core::errors::{LockNetError, Result};
 const BACKUP_ALGORITHM: &str = "ln.encryption.backup.v1";
 const BACKUP_HKDF_INFO: &[u8] = b"LOCKNET_ENCRYPTION_BACKUP_V1";
 
-// ---- RecoveryKey ----
 
 #[derive(Clone)]
 pub struct RecoveryKey([u8; 32]);
 
 impl std::fmt::Debug for RecoveryKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // Секрет намеренно не печатаем
         write!(f, "RecoveryKey(<redacted 32 bytes>)")
     }
 }
@@ -64,7 +62,6 @@ impl RecoveryKey {
     }
 }
 
-// ---- Results ----
 
 #[derive(Debug, Clone)]
 pub struct BackupExportResult {
@@ -78,7 +75,6 @@ pub struct BackupImportResult {
     pub sessions_imported: u32,
 }
 
-// ---- Helper ----
 
 pub struct LockNetBackupHelper {
     pub(crate) cmd_tx: CmdSender,
@@ -87,7 +83,6 @@ pub struct LockNetBackupHelper {
 }
 
 impl LockNetBackupHelper {
-    // ---- wire methods ----
 
     pub async fn versions(&self) -> Result<Vec<BackupVersion>> {
         #[derive(serde::Deserialize)]
@@ -140,12 +135,8 @@ impl LockNetBackupHelper {
         dispatch_unit(&self.cmd_tx, json!({ "type": "backup_delete", "data": { "version": version } })).await
     }
 
-    // ---- real backup flows ----
 
-    /// Экспортирует все известные megolm_inbound сессии в новую backup-версию.
-    /// Шифрует XSalsa20-Poly1305 (SecretBox-совместимо) с ключом,
-    /// производным от `recovery_key` через HKDF-SHA256.
-    pub async fn export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
+                pub async fn export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
         let secret = derive_backup_secret(recovery_key)?;
         let public_key = b64_no_pad(&sha256_bytes(&secret));
 
@@ -187,9 +178,7 @@ impl LockNetBackupHelper {
         Ok(BackupExportResult { version, items_uploaded: uploaded })
     }
 
-    /// Импортирует все megolm_inbound из backup-версии.
-    /// Проверяет, что `recovery_key` действительно матчит `auth_data.public_key`.
-    pub async fn import(
+            pub async fn import(
         &self,
         version: i32,
         recovery_key: &RecoveryKey,
@@ -243,7 +232,6 @@ impl LockNetBackupHelper {
     }
 }
 
-// ---- crypto helpers ----
 
 fn derive_backup_secret(rk: &RecoveryKey) -> Result<[u8; 32]> {
     let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), rk.as_bytes());

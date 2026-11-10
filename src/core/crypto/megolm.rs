@@ -21,13 +21,9 @@ pub fn encrypt(session: &mut GroupSession, plaintext: &str) -> String {
 }
 
 pub fn import_inbound(session_key_b64: &str) -> Result<InboundGroupSession> {
-    // Пробуем v2 (нативный SessionKey — приходит из GroupSession::session_key
-    // и из ln.encryption.group_key)
     if let Ok(key) = SessionKey::from_base64(session_key_b64) {
         return Ok(InboundGroupSession::new(&key, SessionConfig::version_1()));
     }
-    // Пробуем v1 (ExportedSessionKey — приходит из InboundGroupSession::export_at,
-    // используется для backup)
     if let Ok(key) = ExportedSessionKey::from_base64(session_key_b64) {
         return Ok(InboundGroupSession::import(&key, SessionConfig::version_1()));
     }

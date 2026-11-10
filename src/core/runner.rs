@@ -217,10 +217,6 @@ async fn drain_pending(pending: &Pending) {
     }
 }
 
-/// Следующий шаг экспоненциального backoff: `current * 2`, но не больше `max`.
-///
-/// Вынесено из `run` — чтобы покрыть unit-тестами (экспоненциальный рост +
-/// cap). Сами `sleep` и сетевые ошибки — интеграционный сценарий, не unit.
 pub(crate) fn next_backoff(current: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
     (current * 2).min(max)
 }

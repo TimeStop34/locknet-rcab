@@ -6,9 +6,6 @@ use crate::core::errors::Result;
 use crate::core::policies::MegolmRotationVisibility;
 use super::security::SecurityHelper;
 
-/// Раздаёт `ln.encryption.group_key` для `chat_id` всем сессиям всех
-/// участников (кроме нашей текущей сессии — у нас уже есть inbound).
-/// Возвращает число получателей.
 pub(crate) async fn fan_out_group_key(
     low: &Arc<LockNetLowAgent>,
     chat_id: i64,
@@ -28,7 +25,6 @@ pub(crate) async fn fan_out_group_key(
 
     let mut shared = 0usize;
     for uid in participant_ids {
-        // User-level gate (для OnlyVerifiedUsers)
         if policy == MegolmRotationVisibility::OnlyVerifiedUsers
             && !security.is_user_verified(*uid).await
         {
@@ -44,7 +40,6 @@ pub(crate) async fn fan_out_group_key(
                 continue;
             }
 
-            // Session-level gate (для OnlyVerifiedSessions и OnlyVerifiedUsers)
             if policy != MegolmRotationVisibility::AllMembers
                 && !security.is_session_verified(*uid, *sid).await
             {

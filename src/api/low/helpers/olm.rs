@@ -28,8 +28,6 @@ impl LockNetOlmHelper {
 async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i64, to_session_id: i64, plaintext: String) -> Result<()> {
     let entries = store.olm_sessions(to_session_id).await;
 
-    // 1. Established-first: сессии, которые уже получали сообщения,
-    //    шифруют NormalMessage (type=1) без расходования нового OTK.
     for entry in entries.iter().rev() {
         let mut session = entry.session.lock().await;
         if !session.has_received_message() {
@@ -37,7 +35,6 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
         }
         let encrypted = encrypt_olm(&mut session, &plaintext);
         drop(session);
-        // ratchet advanced → save back
         store.olm_persist(to_session_id, &entries).await;
         send_to_device(
             &cmd_tx,
@@ -50,7 +47,6 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
         return Ok(());
     }
 
-    // 2. Fallback: prekey-state session (наш Outbound без ответа).
     if let Some(entry) = entries.last() {
         let mut session = entry.session.lock().await;
         let encrypted = encrypt_olm(&mut session, &plaintext);
@@ -125,7 +121,6 @@ async fn decrypt_impl(store: Arc<dyn CryptoStore>, payload: ToDevicePayload) -> 
         let mut session = entry.session.lock().await;
         if let Ok(pt) = decrypt_olm(&mut session, inner.ciphertext_type, &inner.body) {
             drop(session);
-            // ratchet advanced + has_received_message may have flipped → persist.
             store.olm_persist(peer_session_id, &entries).await;
             return Ok(Some(pt));
         }

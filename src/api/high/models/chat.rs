@@ -132,12 +132,7 @@ impl Chat {
         Ok(())
     }
 
-    /// Fan-out актуального megolm-ключа, если:
-    /// - произошла auto-rotation (`was_rotated = true`)
-    /// - покрытие изменилось (другой session_id или другой member_count)
-    ///
-    /// Обновляет `ChatInner::coverage` после успешного fan-out.
-    async fn ensure_fanout(
+                        async fn ensure_fanout(
         &self,
         info: &crate::api::low::helpers::megolm::MegolmSessionInfo,
         was_rotated: bool,

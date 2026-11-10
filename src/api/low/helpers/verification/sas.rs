@@ -51,7 +51,6 @@ pub enum SasStep {
     Cancelled(String),
 }
 
-// --- SasHandshake: X25519 + HKDF ---
 
 struct SasHandshake {
     our_secret: StaticSecret,
@@ -101,18 +100,15 @@ impl SasHandshake {
         Ok(okm)
     }
 
-    /// libolm SAS MAC: HMAC-SHA256(key=HKDF(shared, info=context), input)
-    fn calculate_mac(&self, input: &[u8], info: &[u8]) -> Result<[u8; 32]> {
+        fn calculate_mac(&self, input: &[u8], info: &[u8]) -> Result<[u8; 32]> {
         use hmac::{Hmac, Mac};
         let shared = self.shared_bytes()?;
 
-        // 1. HKDF(ikm=shared, salt=0, info=context) → 32-байтовый ключ HMAC
         let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), &shared);
         let mut key = [0u8; 32];
         hk.expand(info, &mut key)
             .map_err(|e| LockNetError::InvalidResponse(format!("hkdf calculate_mac key: {e}")))?;
 
-        // 2. HMAC-SHA256(key, input)
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key)
             .map_err(|e| LockNetError::InvalidResponse(format!("hmac key: {e}")))?;
         mac.update(input);
@@ -140,7 +136,6 @@ fn emoji_indices(bytes: &[u8]) -> [u8; 7] {
     out
 }
 
-// --- SasFlow ---
 
 pub struct SasFlow {
     txid: String,

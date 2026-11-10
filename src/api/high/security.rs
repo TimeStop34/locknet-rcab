@@ -18,23 +18,11 @@ pub struct SecurityHelper {
 }
 
 impl SecurityHelper {
-    /// Проверяет, что `user_id` доверен через Web of Trust.
-    ///
-    /// Корень — наш user_id. Идём по цепочке `my_usk -> A.msk -> A.usk -> B.msk -> ...`.
-    ///
-    /// - Себя считаем доверенным всегда.
-    /// - Прямая подпись — частный случай (длина цепочки = 1).
-    /// - Транзитивная цепочка (A -> B -> C) тоже валидна.
-    ///
-    /// Кэш `state.reachable_users` инвалидируется на `CrossSigningSignatureAdded`
-    /// и `CrossSigningReset` через `process_event`.
-    pub async fn is_user_verified(&self, user_id: i64) -> bool {
+                                            pub async fn is_user_verified(&self, user_id: i64) -> bool {
         if user_id == self.low.user_id() {
             return true;
         }
 
-        // 1. Локальный кэш: если мы только что верифицировали через SAS/QR,
-        //    не строим граф ради одного запроса.
         {
             let st = self.state.read().await;
             if st.verified_users.contains(&user_id) {
@@ -45,14 +33,10 @@ impl SecurityHelper {
             }
         }
 
-        // 2. Перестроить граф WoT по всем известным user'ам.
         let mut candidates: Vec<i64> = {
             let st = self.state.read().await;
             st.users.keys().copied().collect()
         };
-        // Гарантируем, что сам себя и target всегда в списке — иначе
-        // query_cross_signing_keys вернёт неполные данные, если state.users
-        // пуст (например, свежий клиент, до первого события).
         if !candidates.contains(&self.low.user_id()) {
             candidates.push(self.low.user_id());
         }
@@ -136,7 +120,6 @@ impl SecurityHelper {
         Ok(())
     }
 
-    // ---- SAS ----
 
     async fn async_our_keys_and_ed(&self) -> Result<(String, String)> {
         let keys = self.low.store().cross_signing_keys().await
@@ -281,8 +264,6 @@ impl SecurityHelper {
                 let mut st = self.state.write().await;
                 st.verified_sessions.insert(peer_sid);
                 st.verified_users.insert(peer_uid);
-                // Новое ребро USK -> peer.MSK могло появиться на сервере
-                // (мы подписали в sas_next), инвалидируем WoT-кэш.
                 st.invalidate_trust_graph();
             }
             let _ = self.event_tx.send(HighEvent::SessionVerified {
@@ -344,7 +325,6 @@ impl SecurityHelper {
         Some(guard.check_status())
     }
 
-    // ---- QR ----
 
     pub async fn qr_display(
         &self,
@@ -460,7 +440,6 @@ impl SecurityHelper {
         Ok(())
     }
 
-    // ---- Backup ----
 
     pub async fn backup_export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
         self.low.backup().export(recovery_key).await
@@ -474,9 +453,7 @@ impl SecurityHelper {
         self.low.backup().import(version, recovery_key).await
     }
 
-    /// Генерит новый `RecoveryKey`, экспортирует всё, возвращает `(recovery_key, result)`.
-    /// Пользователь **обязан** сохранить `recovery_key` — без него восстановить нельзя.
-    pub async fn backup_export_default(&self) -> Result<(RecoveryKey, BackupExportResult)> {
+            pub async fn backup_export_default(&self) -> Result<(RecoveryKey, BackupExportResult)> {
         let rk = RecoveryKey::generate();
         let result = self.backup_export(&rk).await?;
         Ok((rk, result))
@@ -494,12 +471,7 @@ impl SecurityHelper {
         self.low.backup().delete(version).await
     }
 
-    /// Явно сбрасывает кэш Web of Trust.
-    ///
-    /// Нужно вызывать, если клиент только что сделал `upload_signatures`
-    /// (USK подписал чей-то MSK) вручную — сервер **не** шлёт нам событие
-    /// об этой подписи (событие идёт подписанному, а не подписанту).
-    pub async fn invalidate_trust_cache(&self) {
+                        pub async fn invalidate_trust_cache(&self) {
         let mut st = self.state.write().await;
         st.invalidate_trust_graph();
     }

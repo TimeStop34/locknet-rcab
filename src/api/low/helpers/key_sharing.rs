@@ -16,7 +16,6 @@ const LN_GROUP_KEY: &str = "ln.encryption.group_key";
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-// ---- Responder side ----
 
 #[derive(Debug, Clone)]
 pub struct IncomingKeyRequest {
@@ -52,12 +51,7 @@ impl LockNetKeySharingHelper {
         .await
     }
 
-    /// Отправляет `ln.encryption.key_request`, возвращает `transaction_id`.
-    ///
-    /// **НЕ подписывается** на `low.event_tx` — вызывающий должен сам слушать
-    /// `HighEvent::KeyRequest{Imported,Done,Denied}`, которые эмитит `LockNetAgent`
-    /// после расшифровки ответа. Так избегаем гонки за Olm-сессию (ratchet stateful).
-    pub async fn send_request_only(
+                        pub async fn send_request_only(
         &self,
         to_user: i64,
         to_session: i64,
@@ -93,10 +87,7 @@ impl LockNetKeySharingHelper {
         Ok(txid)
     }
 
-    /// Ждёт первый `ln.encryption.key_request`.
-    ///
-    /// `rx` должен быть подписан **до** того, как peer отправит запрос.
-    pub async fn wait_request(
+                pub async fn wait_request(
         &self,
         rx: &mut broadcast::Receiver<Event>,
         timeout: Duration,
@@ -151,8 +142,6 @@ impl LockNetKeySharingHelper {
         megolm_session_id: String,
         session_key: String,
     ) -> Result<()> {
-        // Общий конструктор: включает group_data/group_data_key (если у нас
-        // есть локальная policy) + transaction_id (для key_request-ответа).
         let content = crate::api::low::helpers::megolm::build_group_key_content(
             &self.megolm.store,
             chat_id,
@@ -202,14 +191,6 @@ impl LockNetKeySharingHelper {
     }
 }
 
-// ---- Requester side (low-level, standalone flow) ----
-//
-// ВНИМАНИЕ: этот flow сам дешифрует `to_device` через свой `olm.decrypt`.
-// Если на этом же клиенте работает `LockNetAgent` (high), то он ТОЖЕ будет
-// дешифровать те же самые события → гонка за stateful Olm-сессию.
-//
-// Для случая «high agent + key_request» используйте
-// `LockNetKeySharingHelper::send_request_only` + `HighEvent::KeyRequest*`.
 
 #[derive(Debug)]
 pub enum KeyRequestStep {
@@ -362,9 +343,6 @@ impl KeyRequestFlow {
                     .import(chat_id, megolm_session_id.clone(), session_key)
                     .await?;
 
-                // Парсим group_data / group_data_key (если есть) и сохраняем policy
-                // в store. Без этого после key_request у получателя не будет
-                // истории политик → Chat::ensure_policy_known откажет на send.
                 crate::api::low::helpers::megolm::apply_group_data_to_store(
                     &self.megolm.store,
                     chat_id,

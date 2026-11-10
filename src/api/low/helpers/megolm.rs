@@ -72,7 +72,6 @@ impl LockNetMegolmHelper {
         let inbound = import_inbound(&key)?;
         self.store.megolm_inbound_put(chat_id, sid.clone(), Arc::new(Mutex::new(inbound))).await;
 
-        // Метаданные для auto-rotation
         self.store.megolm_outbound_meta_put(
             chat_id,
             MegolmOutboundMeta {
@@ -89,15 +88,7 @@ impl LockNetMegolmHelper {
         })
     }
 
-    /// Возвращает `(info, was_rotated)`.
-    ///
-    /// `was_rotated = true` — только что произошла auto-rotation по TTL или
-    /// счётчику. Caller (`Chat::send`) должен сделать fan-out нового ключа
-    /// и sync policy blob на сервер.
-    ///
-    /// `was_rotated = false` — сессия та же, fan-out не нужен (если только
-    /// состав не изменился — за это отвечает `Chat::coverage`).
-    pub async fn ensure_session(&self, chat_id: i64) -> Result<(MegolmSessionInfo, bool)> {
+                                    pub async fn ensure_session(&self, chat_id: i64) -> Result<(MegolmSessionInfo, bool)> {
         let existing = self.store.megolm_outbound(chat_id).await;
         let existing_key = self.store.megolm_outbound_key(chat_id).await;
         let meta = self.store.megolm_outbound_meta(chat_id).await;
@@ -135,7 +126,6 @@ impl LockNetMegolmHelper {
             ));
         }
 
-        // Нет outbound — создаём.
         let info = self.create(chat_id).await?;
         Ok((info, true))
     }
@@ -154,8 +144,6 @@ impl LockNetMegolmHelper {
             (sid, ct)
         };
 
-        // Инкремент счётчика для auto-rotation. Не ротируем здесь —
-        // это делает `ensure_session` (чтобы caller мог сделать fan-out).
         if let Some(mut meta) = self.store.megolm_outbound_meta(chat_id).await {
             meta.messages_sent = meta.messages_sent.saturating_add(1);
             self.store.megolm_outbound_meta_put(chat_id, meta).await;
@@ -253,7 +241,6 @@ impl LockNetMegolmHelper {
     }
 }
 
-// ---- shared helpers ----
 
 pub(crate) async fn build_group_key_content(
     store: &Arc<dyn CryptoStore>,

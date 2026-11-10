@@ -9,10 +9,6 @@ use crate::core::policies::GroupData;
 const GROUP_DATA_HKDF_INFO: &[u8] = b"LOCKNET_ENCRYPTED_GROUP_DATA_V1";
 const NONCE_LEN: usize = 24;
 
-/// Деривирует 32-байтный ключ шифрования `GroupData` из `group_data_key`,
-/// который приходит в `ln.encryption.group_key` через Olm.
-///
-/// HKDF-SHA256, salt=0, info=`LOCKNET_ENCRYPTED_GROUP_DATA_V1`.
 pub fn derive_group_data_encryption_key(group_data_key: &[u8; 32]) -> Result<[u8; 32]> {
     use hkdf::Hkdf;
     use sha2::Sha256;
@@ -23,8 +19,6 @@ pub fn derive_group_data_encryption_key(group_data_key: &[u8; 32]) -> Result<[u8
     Ok(okm)
 }
 
-/// Шифрует `GroupData` ключом `group_data_key` (SecretBox: XSalsa20-Poly1305).
-/// Формат выхода: `b64(nonce || ciphertext)`.
 pub fn encrypt_group_data(data: &GroupData, group_data_key: &[u8; 32]) -> Result<String> {
     let key = derive_group_data_encryption_key(group_data_key)?;
     let cipher = XSalsa20Poly1305::new(GenericArray::from_slice(&key));
@@ -45,8 +39,6 @@ pub fn encrypt_group_data(data: &GroupData, group_data_key: &[u8; 32]) -> Result
     Ok(base64::engine::general_purpose::STANDARD_NO_PAD.encode(&blob))
 }
 
-/// Расшифровывает blob, произведённый `encrypt_group_data`.
-/// `Err(InvalidArgument)` — неверный ключ или подмена (tag fail).
 pub fn decrypt_group_data(blob_b64: &str, group_data_key: &[u8; 32]) -> Result<GroupData> {
     let key = derive_group_data_encryption_key(group_data_key)?;
     let cipher = XSalsa20Poly1305::new(GenericArray::from_slice(&key));

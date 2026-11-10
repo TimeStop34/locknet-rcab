@@ -15,23 +15,13 @@ pub struct LockNetConfig {
     pub reconnect_backoff_max: Duration,
     pub accept_invalid_certs: bool,
 
-    /// Максимальное время ожидания ответа на один WS-запрос.
-    /// Если runner не прислал reply за это время, `dispatch` возвращает
-    /// `LockNetError::Timeout`. Защищает от зависания на мёртвом сервере.
-    pub request_timeout: Duration,
+                pub request_timeout: Duration,
 
-    /// Fallback-политика, если сервер не отдал `Group.history_visibility`.
-    pub default_history_visibility: HistoryVisibility,
-    /// Fallback-политика, если сервер не отдал `Group.megolm_rotation_visibility`.
-    pub default_megolm_rotation_visibility: MegolmRotationVisibility,
+        pub default_history_visibility: HistoryVisibility,
+        pub default_megolm_rotation_visibility: MegolmRotationVisibility,
 
-    /// Ротировать Megolm outbound после N отправленных сообщений.
-    /// `0` = отключить (никогда не ротировать по счётчику).
-    pub megolm_rotation_message_count: u64,
-    /// Ротировать Megolm outbound раз в N секунд с момента создания.
-    /// `0` = отключить (никогда не ротировать по TTL).
-    /// По умолчанию 7 дней = 7 * 24 * 3600.
-    pub megolm_rotation_ttl_secs: u64,
+            pub megolm_rotation_message_count: u64,
+                pub megolm_rotation_ttl_secs: u64,
 }
 
 impl LockNetConfig {

@@ -47,9 +47,7 @@ impl QrMode {
         }
     }
 
-    /// Mode 0 (user-to-user) MAC'ает master signing key.
-    /// Mode 1/2 (self-device) MAC'ает ed25519 устройства.
-    fn mac_target(self) -> MacTarget {
+            fn mac_target(self) -> MacTarget {
         match self {
             QrMode::UserToUser => MacTarget::MasterKey,
             QrMode::SelfDeviceTrusted | QrMode::SelfDeviceUntrusted => MacTarget::Ed25519,
@@ -72,13 +70,9 @@ pub struct QrCode {
 
 #[derive(Debug)]
 pub enum QrStep {
-    /// Протокол handshake завершён, `mac_key` доступен через `QrFlow::mac_key()`.
-    /// Следующий шаг — `exchange_mac(peer_key_b64)`.
-    Confirmed,
-    /// MAC peer'а проверен успешно.
-    Verified,
-    /// Протокол отменён (secret mismatch, MAC mismatch, cancel()).
-    Cancelled(String),
+            Confirmed,
+        Verified,
+        Cancelled(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -105,13 +99,11 @@ pub struct QrFlow {
     our_msk_b64: String,
     our_ed25519_b64: String,
 
-    // X25519 ephemeral
     eph_secret: Option<StaticSecret>,
     peer_eph_pub: Option<PublicKey>,
     shared: Option<[u8; 32]>,
     mac_key: Option<[u8; 32]>,
 
-    // Displayer: secret, который мы вложили в QR — сканер должен его вернуть
     scan_secret: Option<[u8; 8]>,
 
     olm: Arc<LockNetOlmHelper>,
@@ -120,9 +112,7 @@ pub struct QrFlow {
 }
 
 impl QrFlow {
-    /// Сторона, которая **показывает** QR-код (displayer).
-    /// Возвращает `QrCode` (raw для рендера в QR) и `QrFlow` в состоянии `WaitingScanned`.
-    pub async fn display(
+            pub async fn display(
         mode: QrMode,
         olm: Arc<LockNetOlmHelper>,
         event_rx: broadcast::Receiver<Event>,
@@ -161,9 +151,7 @@ impl QrFlow {
         Ok((code, flow))
     }
 
-    /// Сторона, которая **сканирует** QR-код (scanner).
-    /// Сразу отправляет `qr.scanned` displayer'у. Возвращает `QrFlow` в состоянии `WaitingConfirm`.
-    pub async fn scan(
+            pub async fn scan(
         qr_raw: &str,
         olm: Arc<LockNetOlmHelper>,
         event_rx: broadcast::Receiver<Event>,
@@ -208,12 +196,7 @@ impl QrFlow {
     pub fn mode(&self) -> QrMode { self.mode }
     pub fn mac_key(&self) -> Option<&[u8; 32]> { self.mac_key.as_ref() }
 
-    /// Первый шаг протокола.
-    /// - Displayer: ждёт `qr.scanned`, проверяет secret, вычисляет `mac_key`, шлёт `qr.confirm` → `Confirmed`.
-    /// - Scanner: ждёт `qr.confirm` → `Confirmed`.
-    ///
-    /// После `Confirmed` обе стороны вызывают `exchange_mac(peer_key_b64)`.
-    pub async fn next(&mut self) -> Result<QrStep> {
+                        pub async fn next(&mut self) -> Result<QrStep> {
         match self.state.clone() {
             InternalState::WaitingScanned => {
                 if self.role != QrRole::Displayer {
@@ -233,7 +216,6 @@ impl QrFlow {
                     .and_then(|v| v.as_str())
                     .ok_or_else(|| LockNetError::InvalidResponse("qr.scanned: no secret".into()))?;
 
-                // 1. Проверяем secret (доказательство сканирования)
                 let expected_secret = self
                     .scan_secret
                     .ok_or_else(|| LockNetError::InvalidResponse("scan_secret missing".into()))?;
@@ -243,7 +225,6 @@ impl QrFlow {
                     return Ok(QrStep::Cancelled("secret mismatch".into()));
                 }
 
-                // 2. Считаем shared
                 let peer_pub_bytes = decode_b64(&peer_pub_b64)?;
                 if peer_pub_bytes.len() != 32 {
                     self.state = InternalState::Cancelled("invalid peer eph pubkey length".into());
@@ -262,7 +243,6 @@ impl QrFlow {
                 self.shared = Some(shared);
                 self.mac_key = Some(compute_mac_key(&shared)?);
 
-                // 3. Шлём confirm
                 self.send_confirm().await?;
                 self.state = InternalState::WaitingMac;
                 Ok(QrStep::Confirmed)
@@ -289,12 +269,7 @@ impl QrFlow {
         }
     }
 
-    /// Отправляет наш MAC (по mode: MSK или ed25519), ждёт MAC от peer'а,
-    /// пересчитывает его по `peer_key_b64` и сравнивает.
-    ///
-    /// `peer_key_b64` — это тот ключ, который MAC'ает peer: MSK для mode 0,
-    /// ed25519 устройства для mode 1/2.
-    pub async fn exchange_mac(&mut self, peer_key_b64: String) -> Result<QrStep> {
+                        pub async fn exchange_mac(&mut self, peer_key_b64: String) -> Result<QrStep> {
         if !matches!(self.state, InternalState::WaitingMac) {
             return Err(LockNetError::InvalidArgument(
                 "exchange_mac: not in WaitingMac state".into(),
@@ -305,7 +280,6 @@ impl QrFlow {
             .mac_key
             .ok_or_else(|| LockNetError::InvalidResponse("mac_key missing".into()))?;
 
-        // 1. Свой MAC
         let our_key_str = match self.mode.mac_target() {
             MacTarget::MasterKey => self.our_msk_b64.clone(),
             MacTarget::Ed25519 => self.our_ed25519_b64.clone(),
@@ -313,21 +287,18 @@ impl QrFlow {
         let our_key_bytes = decode_b64(&our_key_str)?;
         let our_mac = compute_hmac(&mac_key, &our_key_bytes)?;
 
-        // 2. Отправляем
         let content = json!({
             "transaction_id": self.txid,
             "mac": b64_no_pad(&our_mac),
         });
         self.send_qr_message(QR_MAC, content).await?;
 
-        // 3. Ждём MAC peer'а
         let recv_content = self.wait_for_qr(QR_MAC).await?;
         let their_mac_b64 = recv_content
             .get("mac")
             .and_then(|v| v.as_str())
             .ok_or_else(|| LockNetError::InvalidResponse("qr.mac: no mac".into()))?;
 
-        // 4. Пересчитываем по peer_key_b64 и сравниваем
         let peer_key_bytes = decode_b64(&peer_key_b64)?;
         let expected_mac = compute_hmac(&mac_key, &peer_key_bytes)?;
         let their_mac_bytes = decode_b64(their_mac_b64)?;
@@ -349,7 +320,6 @@ impl QrFlow {
         Ok(())
     }
 
-    // ---- internal ----
 
     async fn send_scanned(&self, our_eph_pub: &PublicKey, secret: &[u8; 8]) -> Result<()> {
         let content = json!({
@@ -395,7 +365,6 @@ impl QrFlow {
     }
 }
 
-// ---- helpers ----
 
 fn qr_generate(mode: QrMode, txid: &str) -> (String, StaticSecret, [u8; 8]) {
     let mut sk_bytes = [0u8; 32];

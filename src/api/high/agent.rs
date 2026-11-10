@@ -412,20 +412,12 @@ async fn respond_key_request(
     }
 }
 
-/// Пытается расшифровать все `pending_decrypt[chat_id]` сообщения
-/// актуальными megolm-inbound ключами. Обновляет `state.messages[*].text`,
-/// убирает успешные из pending и эмитит `HighEvent::MessageDecrypted`
-/// для каждого.
-///
-/// Вызывается после успешного импорта нового megolm-ключа
-/// (`ln.encryption.group_key` в `process_event`).
 async fn try_decrypt_pending(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
     event_tx: &broadcast::Sender<HighEvent>,
     chat_id: i64,
 ) {
-    // 1. Снять копию (message_id, encrypted) из state.
     let pending: Vec<(i64, crate::api::low::models::Encrypted)> = {
         let st = state.read().await;
         st.pending_decrypt_for(chat_id)
@@ -443,7 +435,6 @@ async fn try_decrypt_pending(
         return;
     }
 
-    // 2. Пробуем decrypt по каждому.
     let mut decrypted: Vec<(i64, String)> = Vec::new();
     for (mid, enc) in pending {
         if let Ok(Some(text)) = low.megolm().decrypt(chat_id, &enc).await {
@@ -455,7 +446,6 @@ async fn try_decrypt_pending(
         return;
     }
 
-    // 3. Обновляем state + чистим pending только для успешных.
     {
         let mut st = state.write().await;
         for (mid, text) in &decrypted {
@@ -468,7 +458,6 @@ async fn try_decrypt_pending(
         st.retain_pending_decrypt(chat_id, |mid| !decrypted_ids.contains(&mid));
     }
 
-    // 4. Эмитим MessageDecrypted.
     for (mid, text) in decrypted {
         let _ = event_tx.send(HighEvent::MessageDecrypted {
             chat_id,
@@ -613,9 +602,6 @@ async fn process_event(
                 u
             };
 
-            // Ротация имеет смысл только если мы **участвуем** в группе —
-            // то есть знаем политику. Иначе мы свежее устройство без ключа,
-            // и создание новой policy с "creation defaults" = downgrade-атака.
             let has_local_policy = low.store().group_data_state(mc.group_id).await.is_some();
 
             if has_local_policy {
@@ -652,7 +638,6 @@ async fn process_event(
                                     tracing::warn!(?e, "membership rotation fan-out failed");
                                 }
 
-                                // Sync new blob to server (creator only, idempotent).
                                 if let Ok(fresh) = low.groups().info(mc.group_id).await {
                                     if fresh.created_by == low.user_id() {
                                         if let Some(state_gd) = low.store().group_data_state(mc.group_id).await {
@@ -682,18 +667,10 @@ async fn process_event(
             });
         }
         LowEvent::GroupDataUpdated { group_id } => {
-            // Сервер уведомил, что `encrypted_group_data` обновлён (кем-то
-            // из участников — обычно создателем). Перечитываем группу:
-            // `group_to_domain` расшифрует новый blob нашим локальным
-            // `group_data_key` и применит anti-replay по version.
-            //
-            // Если не сможем расшифровать (ротация с другого устройства) —
-            // `group_data` остаётся `None`, применяются строжайшие defaults.
             if let Ok(dto) = low.groups().info(group_id).await {
                 let g = {
                     let mut st = state.write().await;
                     if !st.groups.contains_key(&group_id) {
-                        // Группа не в кэше — нам неинтересно (мы её не знаем)
                         return Ok(());
                     }
                     let g = st.group_to_domain(&dto, low).await;
@@ -734,7 +711,6 @@ async fn process_event(
                                             megolm_session_id: mid,
                                         });
                                     }
-                                    // Новый ключ — попробовать расшифровать pending
                                     try_decrypt_pending(low, state, event_tx, cid).await;
                                 }
                             }

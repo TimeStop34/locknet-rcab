@@ -36,10 +36,6 @@ impl Event {
             "group_invite_created" => serde_json::from_value(data).map(Event::GroupInviteCreated).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "group_membership_changed" => serde_json::from_value(data).map(Event::GroupMembershipChanged).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "group_data_updated" => {
-                // `group_id == 0` — невалидный snowflake. Сервер такого не
-                // пришлёт, но если пришлёт (malformed / старый формат) —
-                // лучше Unknown, чем GroupDataUpdated{group_id: 0} который
-                // в `process_event` дойдёт до `info(0)` и вернёт `not_found`.
                 match data.get("group_id").and_then(|v| v.as_i64()) {
                     Some(id) if id != 0 => Event::GroupDataUpdated { group_id: id },
                     _ => Event::Unknown { event_type, data },
@@ -62,7 +58,6 @@ mod tests {
         Event::parse(v)
     }
 
-    // ---- message_create ----
 
     #[test]
     fn parse_message_create_ok() {
@@ -104,7 +99,6 @@ mod tests {
                 "chat_id": 2i64,
                 "author_id": 3i64,
                 "author_session_id": 4i64,
-                // нет encrypted
                 "thread_id": null,
                 "created_at": "2026-01-01T00:00:00Z",
                 "edited_at": null,
@@ -126,7 +120,6 @@ mod tests {
         }
     }
 
-    // ---- group_data_updated ----
 
     #[test]
     fn parse_group_data_updated_ok() {
@@ -160,7 +153,6 @@ mod tests {
 
     #[test]
     fn parse_group_data_updated_string_id_becomes_unknown() {
-        // Сервер должен присылать i64, но если пришлёт строку — не паникуем.
         let v = json!({ "type": "group_data_updated", "data": { "group_id": "42" } });
         match parse(v) {
             Event::Unknown { event_type, .. } => assert_eq!(event_type, "group_data_updated"),
@@ -168,12 +160,9 @@ mod tests {
         }
     }
 
-    // ---- error ----
 
     #[test]
     fn parse_error_becomes_unknown() {
-        // error обрабатывается в runner до parse. Если всё-таки дошёл —
-        // попадает в Unknown, не паникует.
         let v = json!({
             "type": "error",
             "id": "r1",
@@ -197,7 +186,6 @@ mod tests {
         }
     }
 
-    // ---- unknown / malformed ----
 
     #[test]
     fn parse_unknown_type_preserves_event_type_and_data() {
@@ -225,16 +213,13 @@ mod tests {
 
     #[test]
     fn parse_no_data_field_does_not_panic() {
-        // Envelope без data — parse читает data как Value::Null.
         let v = json!({ "type": "message_create" });
-        // Не паникует; результат — Unknown (т.к. MessageCreate из Null не парсится).
         match parse(v) {
             Event::Unknown { event_type, .. } => assert_eq!(event_type, "message_create"),
             other => panic!("expected Unknown, got {other:?}"),
         }
     }
 
-    // ---- group_membership_changed / reaction_add ----
 
     #[test]
     fn parse_membership_changed_ok() {

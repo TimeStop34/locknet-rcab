@@ -28,12 +28,6 @@ pub(crate) enum Cmd {
     Shutdown { reply: oneshot::Sender<()> },
 }
 
-/// Обёртка над `mpsc::Sender<Cmd>` с per-request таймаутом.
-///
-/// Все helpers (`LockNetMessagesHelper` и т.д.) хранят `CmdSender` вместо
-/// голого `mpsc::Sender<Cmd>` и вызывают `dispatch(&self.cmd_tx, payload)`.
-/// Таймаут берётся из `LockNetConfig::request_timeout` и применяется
-/// автоматически.
 #[derive(Clone)]
 pub(crate) struct CmdSender {
     tx: mpsc::Sender<Cmd>,
@@ -46,11 +40,6 @@ impl CmdSender {
     }
 }
 
-/// Отправляет `payload` в runner и ждёт ответ с таймаутом.
-///
-/// - Runner закрыт → `RunnerDown`.
-/// - Runner не ответил за `cmd_tx.timeout()` → `Timeout`.
-/// - Runner ответил ошибкой → `Server { code, message }`.
 pub(crate) async fn dispatch<T: DeserializeOwned + Send + 'static>(
     cmd_tx: &CmdSender,
     payload: Value,
@@ -120,7 +109,6 @@ mod tests {
         let cmd_tx = CmdSender::new(tx, Duration::from_secs(1));
 
         tokio::spawn(async move {
-            // Принимаем запрос и дропаем reply, не резолвя.
             let _ = rx.recv().await;
         });
 
@@ -139,7 +127,6 @@ mod tests {
         let cmd_tx = CmdSender::new(tx, timeout);
 
         tokio::spawn(async move {
-            // Держим reply handler — dispatch должен таймаутнуть.
             let _held = rx.recv().await;
             tokio::time::sleep(Duration::from_secs(10)).await;
         });

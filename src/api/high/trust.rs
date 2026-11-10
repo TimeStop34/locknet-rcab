@@ -5,27 +5,13 @@ use crate::api::low::agent::LockNetLowAgent;
 use crate::core::crypto::signature::verify_b64;
 use crate::core::errors::Result;
 
-/// Граф доверия (Web of Trust) на основе cross-signing подписей.
-///
-/// Узел — user_id.
-/// Ребро `A -> B` — `A.user_signing_key` подписал `B.master_key`.
-///
-/// Граф строится из `query_cross_signing_keys` и **верифицирует** каждую
-/// подпись Ed25519, а не доверяет серверу на слово.
-///
-/// Транзитивность: `A -> B -> C` означает, что `A` доверяет `C`
-/// через цепочку (B подтвердил C своим USK, A подтвердил B своим USK).
 #[derive(Debug, Default, Clone)]
 pub struct TrustGraph {
     edges: HashMap<i64, HashSet<i64>>,
 }
 
 impl TrustGraph {
-    /// Строит граф из cross-signing ключей указанных user'ов.
-    ///
-    /// Возвращает граф с **уже проверенными** рёбрами.
-    /// Невалидные подписи (или отсутствующие ключи) молча отбрасываются.
-    pub async fn build(
+                    pub async fn build(
         low: &Arc<LockNetLowAgent>,
         user_ids: &[i64],
     ) -> Result<Self> {
@@ -49,8 +35,6 @@ impl TrustGraph {
                     Err(_) => continue,
                 };
 
-                // Самоподпись бессмысленна — MSK не подписывает сам себя
-                // (в нашей схеме MSK подписывает SSK и USK, но не наоборот).
                 if signer_uid == *target_uid {
                     continue;
                 }
@@ -59,8 +43,6 @@ impl TrustGraph {
                     continue;
                 };
 
-                // Публичный USK signer'а берём из того же query.
-                // Если signer'а нет в query — не можем проверить, ребро отбрасываем.
                 let Some(signer_entry) = query.get(&signer_uid) else {
                     continue;
                 };
@@ -77,9 +59,7 @@ impl TrustGraph {
         Ok(Self { edges })
     }
 
-    /// BFS от `from`: все user_id, достижимые по цепочке доверия.
-    /// `from` включается в результат (я доверяю себе по определению).
-    pub fn reachable_from(&self, from: i64) -> HashSet<i64> {
+            pub fn reachable_from(&self, from: i64) -> HashSet<i64> {
         let mut visited: HashSet<i64> = HashSet::new();
         visited.insert(from);
 
@@ -96,8 +76,7 @@ impl TrustGraph {
         visited
     }
 
-    /// Проверка прямой подписи (без транзитивности). Полезно для отладки/тестов.
-    #[allow(dead_code)]
+        #[allow(dead_code)]
     pub fn has_direct(&self, from: i64, to: i64) -> bool {
         self.edges
             .get(&from)
