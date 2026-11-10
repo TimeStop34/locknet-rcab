@@ -1,3 +1,11 @@
+//! Security helper: Web of Trust, cross-signing, SAS/QR verification, key backup.
+//!
+//! [`SecurityHelper`] is the entry point for all trust-related operations on
+//! [`crate::LockNetAgent`]. It orchestrates the low-level cryptographic flows
+//! from [`crate::api::low::helpers`] with the agent's cache
+//! (`crate::api::high::state::ClientState`) and updates the verified-sets
+//! and Web-of-Trust graph on success.
+
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use crate::api::low::agent::LockNetLowAgent;
@@ -11,6 +19,23 @@ use super::event::HighEvent;
 use super::models::User;
 use super::state::ClientState;
 
+/// Trust and verification operations for a [`crate::LockNetAgent`].
+///
+/// Obtained via [`crate::LockNetAgent::security`].
+///
+/// Responsibilities:
+///
+/// - **Web of Trust** — [`Self::is_user_verified`] resolves transitive trust
+///   via cross-signing signatures, with caching and invalidation on
+///   signature-add / reset events.
+/// - **Cross-signing** — [`Self::setup_cross_signing`] generates the user's
+///   MSK/SSK/USK and uploads the public halves; [`Self::reset_cross_signing`]
+///   wipes them.
+/// - **SAS / QR verification** — drives the full flows from
+///   [`crate::api::low::helpers::verification`] and, on success, updates the
+///   verified-sets and invalidates the WoT cache.
+/// - **Key backup** — wraps [`crate::api::low::helpers::backup`] for
+///   exporting and importing Megolm history with a recovery key.
 pub struct SecurityHelper {
     pub(crate) low: Arc<LockNetLowAgent>,
     pub(crate) state: Arc<RwLock<ClientState>>,
@@ -18,11 +43,29 @@ pub struct SecurityHelper {
 }
 
 impl SecurityHelper {
-                                            pub async fn is_user_verified(&self, user_id: i64) -> bool {
+    /// Check whether `user_id` is trusted via the Web of Trust.
+    ///
+    /// Trust is transitive: starting from our own `user_id` as the root, a
+    /// user is trusted if there is a chain `us -> A -> B -> ... -> user_id`
+    /// of USK-to-MSK signatures. `us` is always trusted.
+    ///
+    /// A direct signature counts as a chain of length 1.
+    ///
+    /// Results are cached in `state.reachable_users`; the cache is
+    /// invalidated on [`HighEvent::CrossSigningReset`], on receipt of
+    /// `cross_signing_signature_added`, and after successful SAS or QR
+    /// verification.
+    ///
+    /// The trust graph is rebuilt from
+    /// [`crate::api::low::helpers::LockNetCryptoHelper::query_cross_signing_keys`]
+    /// on cache miss. Every edge is re-verified with Ed25519 — the server
+    /// cannot forge trust.
+    pub async fn is_user_verified(&self, user_id: i64) -> bool {
         if user_id == self.low.user_id() {
             return true;
         }
 
+        // Fast path: local verified-set or cached reachable-set.
         {
             let st = self.state.read().await;
             if st.verified_users.contains(&user_id) {
@@ -33,10 +76,13 @@ impl SecurityHelper {
             }
         }
 
+        // Slow path: rebuild the graph and BFS from us.
         let mut candidates: Vec<i64> = {
             let st = self.state.read().await;
             st.users.keys().copied().collect()
         };
+        // Always include self and the target — the cache may be empty before
+        // the first event.
         if !candidates.contains(&self.low.user_id()) {
             candidates.push(self.low.user_id());
         }
@@ -62,6 +108,17 @@ impl SecurityHelper {
         contains
     }
 
+    /// Check whether a specific session of `user_id` is verified.
+    ///
+    /// Session verification means the user's self-signing key (SSK) has
+    /// signed the session's `ed25519` key. This is weaker than
+    /// [`Self::is_user_verified`] (which requires WoT) but is the
+    /// appropriate check for session-level operations like group key fan-out
+    /// with [`crate::core::policies::MegolmRotationVisibility::OnlyVerifiedSessions`].
+    ///
+    /// The local verified-set is checked first; if the session is not there,
+    /// the cross-signing keys are re-queried from the server and the SSK
+    /// signature is re-verified.
     pub async fn is_session_verified(&self, user_id: i64, session_id: i64) -> bool {
         { let state = self.state.read().await; if state.verified_sessions.contains(&session_id) { return true; } }
         let query = match self.low.crypto().query_cross_signing_keys(vec![user_id]).await { Ok(q) => q, Err(_) => return false };
@@ -73,11 +130,30 @@ impl SecurityHelper {
         verify_b64(&ssk_pub, &ed, &sig).is_ok()
     }
 
+    /// Resolve a user from the local cache, or return a placeholder
+    /// [`User::unknown`] if not cached.
     pub async fn user_info(&self, user_id: i64) -> Result<User> {
         let state = self.state.read().await;
         Ok(state.users.get(&user_id).cloned().unwrap_or_else(|| User::unknown(user_id)))
     }
 
+    /// Generate and upload the user's cross-signing keys.
+    ///
+    /// Creates fresh MSK, SSK, and USK; signs SSK and USK with MSK; uploads
+    /// the public halves to the server; signs the current device's ed25519
+    /// key with SSK; stores the private keys in the local
+    /// [`crate::CryptoStore`].
+    ///
+    /// Can only be called **once** per account. To start over, call
+    /// [`Self::reset_cross_signing`] first.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::AlreadyConnected`] if keys already exist locally.
+    /// - [`LockNetError::Server`] with code `cross_signing_already_exists`
+    ///   if the server has keys for this user.
+    /// - [`LockNetError::Server`] with code `invalid_signature` if the SSK or
+    ///   USK signatures do not verify.
     pub async fn setup_cross_signing(&self) -> Result<()> {
         if self.low.store().cross_signing_keys().await.is_some() { return Err(LockNetError::AlreadyConnected); }
         let keys = CrossSigningKeysPrivate::generate();
@@ -110,6 +186,20 @@ impl SecurityHelper {
         Ok(())
     }
 
+    /// Reset the user's cross-signing keys.
+    ///
+    /// Requires the account password (UIA). The server removes the MSK, SSK,
+    /// USK, all USK signatures on other users' MSKs, and all SSK signatures
+    /// on the user's own sessions. Other users who had signed this user's
+    /// MSK receive a `cross_signing_reset` event and will need to re-verify.
+    ///
+    /// On success, the local verified-users, verified-sessions, and WoT cache
+    /// are also cleared, and the private keys are removed from the local
+    /// [`crate::CryptoStore`].
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `invalid_password`.
     pub async fn reset_cross_signing(&self, password: impl Into<String>) -> Result<()> {
         self.low.crypto().reset_cross_signing_keys(password).await?;
         self.low.store().cross_signing_keys_clear().await;
@@ -120,6 +210,7 @@ impl SecurityHelper {
         Ok(())
     }
 
+    // ---- SAS ----
 
     async fn async_our_keys_and_ed(&self) -> Result<(String, String)> {
         let keys = self.low.store().cross_signing_keys().await
@@ -169,6 +260,17 @@ impl SecurityHelper {
         None
     }
 
+    /// Start a SAS verification as the initiator.
+    ///
+    /// Requires [`Self::setup_cross_signing`] to have been called. The flow
+    /// is registered in the agent's state under a generated transaction ID;
+    /// drive it with [`Self::sas_next`] and [`Self::emoji_confirm`].
+    ///
+    /// Returns the transaction ID.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidResponse`] if cross-signing is not set up.
     pub async fn sas_start(&self, user_id: i64, session_id: i64) -> Result<String> {
         let (msk_b64, ed_b64) = self.async_our_keys_and_ed().await?;
         let flow = SasFlow::start(
@@ -186,6 +288,16 @@ impl SecurityHelper {
         Ok(txid)
     }
 
+    /// Accept a pending SAS `start` from `txid`.
+    ///
+    /// The `start` must have been received and registered via
+    /// [`crate::HighEvent::SasMessage`] first. Sends `accept` and `key`
+    /// immediately.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no pending start exists for
+    ///   `txid`, or if the initiator's user ID cannot be resolved.
     pub async fn sas_accept(&self, txid: &str) -> Result<()> {
         let pending = {
             let mut st = self.state.write().await;
@@ -220,6 +332,12 @@ impl SecurityHelper {
         Ok(())
     }
 
+    /// Decline a pending SAS `start`.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no pending start exists for
+    ///   `txid`.
     pub async fn sas_decline(&self, txid: &str) -> Result<()> {
         let mut st = self.state.write().await;
         if st.pending_sas_starts.remove(txid).is_some() {
@@ -231,6 +349,10 @@ impl SecurityHelper {
         )))
     }
 
+    /// Cancel an active or pending SAS flow.
+    ///
+    /// Safe to call in any state; aborts the flow if it exists and removes it
+    /// from the agent's tracking.
     pub async fn sas_cancel(&self, txid: &str) -> Result<()> {
         let handle = {
             let mut st = self.state.write().await;
@@ -244,6 +366,18 @@ impl SecurityHelper {
         Ok(())
     }
 
+    /// Advance a SAS flow one step.
+    ///
+    /// On [`SasStep::Verified`], the peer's session is added to the
+    /// verified-sessions set, the peer's user is added to the verified-users
+    /// set, the WoT cache is invalidated (our USK signature on their MSK may
+    /// now exist server-side), and [`HighEvent::SessionVerified`] /
+    /// [`HighEvent::UserVerified`] are emitted.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no active flow exists for
+    ///   `txid`.
     pub async fn sas_next(&self, txid: &str) -> Result<SasStep> {
         let handle = {
             let st = self.state.read().await;
@@ -264,6 +398,7 @@ impl SecurityHelper {
                 let mut st = self.state.write().await;
                 st.verified_sessions.insert(peer_sid);
                 st.verified_users.insert(peer_uid);
+                // New USK -> peer.MSK edge may exist; invalidate WoT cache.
                 st.invalidate_trust_graph();
             }
             let _ = self.event_tx.send(HighEvent::SessionVerified {
@@ -275,6 +410,12 @@ impl SecurityHelper {
         Ok(step)
     }
 
+    /// Get the emoji computed by a SAS flow, if the flow is ready for
+    /// confirmation.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no active flow exists.
     pub async fn emojis_get(&self, txid: &str) -> Result<Option<Vec<SasEmoji>>> {
         let handle = {
             let st = self.state.read().await;
@@ -287,6 +428,16 @@ impl SecurityHelper {
         Ok(guard.emoji().map(|s| s.to_vec()))
     }
 
+    /// Confirm (or reject) the SAS emoji.
+    ///
+    /// On accept, looks up the peer's public ed25519 and MSK (needed for MAC
+    /// verification) and sends our MAC. The flow then waits for the peer's
+    /// MAC via [`Self::sas_next`].
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no active flow exists, or if
+    ///   the peer's keys cannot be resolved.
     pub async fn emoji_confirm(&self, txid: &str, accept: bool) -> Result<()> {
         let handle = {
             let st = self.state.read().await;
@@ -306,16 +457,19 @@ impl SecurityHelper {
         guard.confirm_emoji(accept).await
     }
 
+    /// Alias for [`Self::emoji_confirm`].
     pub async fn sas_confirm(&self, txid: &str, accept: bool) -> Result<()> {
         self.emoji_confirm(txid, accept).await
     }
 
+    /// Remove a SAS flow from the agent's tracking without aborting it.
     pub async fn sas_remove(&self, txid: &str) {
         let mut st = self.state.write().await;
         st.active_sas.remove(txid);
         st.pending_sas_starts.remove(txid);
     }
 
+    /// Current status of a SAS flow, if it exists.
     pub async fn sas_status(&self, txid: &str) -> Option<SasStatus> {
         let handle = {
             let st = self.state.read().await;
@@ -325,7 +479,16 @@ impl SecurityHelper {
         Some(guard.check_status())
     }
 
+    // ---- QR ----
 
+    /// Show a QR code (displayer side).
+    ///
+    /// Returns the QR string to render and a transaction ID. Drive the flow
+    /// with [`Self::qr_next`] and [`Self::qr_exchange_mac`].
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidResponse`] if cross-signing is not set up.
     pub async fn qr_display(
         &self,
         mode: crate::api::high::verification::qr::QrMode,
@@ -349,6 +512,15 @@ impl SecurityHelper {
         Ok((code, txid))
     }
 
+    /// Scan a QR code (scanner side).
+    ///
+    /// Returns a transaction ID; the flow is already in `WaitingConfirm`
+    /// state. Drive it with [`Self::qr_next`] and [`Self::qr_exchange_mac`].
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if `qr_raw` is malformed.
+    /// - [`LockNetError::InvalidResponse`] if cross-signing is not set up.
     pub async fn qr_scan(
         &self,
         qr_raw: &str,
@@ -372,6 +544,12 @@ impl SecurityHelper {
         Ok(txid)
     }
 
+    /// Advance a QR flow one step.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no active flow exists, or if
+    ///   `next` is called in the wrong state.
     pub async fn qr_next(&self, txid: &str) -> Result<crate::api::high::verification::qr::QrStep> {
         let handle = {
             let st = self.state.read().await;
@@ -382,6 +560,21 @@ impl SecurityHelper {
         guard.next().await
     }
 
+    /// Exchange QR MACs and verify the peer.
+    ///
+    /// The peer key to MAC is resolved automatically: for
+    /// [`crate::api::high::verification::qr::QrMode::UserToUser`], the peer's
+    /// MSK; for self-device modes, the peer's ed25519.
+    ///
+    /// On [`crate::api::high::verification::qr::QrStep::Verified`], the
+    /// peer's session and user are added to the verified-sets, the WoT cache
+    /// is invalidated, and [`HighEvent::SessionVerified`] /
+    /// [`HighEvent::UserVerified`] are emitted.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if no active flow exists, the
+    ///   handshake is not complete, or the peer's keys cannot be resolved.
     pub async fn qr_exchange_mac(&self, txid: &str) -> Result<crate::api::high::verification::qr::QrStep> {
         let handle = {
             let st = self.state.read().await;
@@ -428,6 +621,9 @@ impl SecurityHelper {
         Ok(step)
     }
 
+    /// Cancel an active QR flow.
+    ///
+    /// Safe to call in any state.
     pub async fn qr_cancel(&self, txid: &str) -> Result<()> {
         let handle = {
             let mut st = self.state.write().await;
@@ -440,11 +636,20 @@ impl SecurityHelper {
         Ok(())
     }
 
+    // ---- Backup ----
 
+    /// Export every known Megolm inbound session to a new backup version.
+    ///
+    /// See [`crate::api::low::helpers::LockNetBackupHelper::export`] for
+    /// details.
     pub async fn backup_export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
         self.low.backup().export(recovery_key).await
     }
 
+    /// Import Megolm sessions from a backup version.
+    ///
+    /// See [`crate::api::low::helpers::LockNetBackupHelper::import`] for
+    /// details.
     pub async fn backup_import(
         &self,
         version: i32,
@@ -453,25 +658,41 @@ impl SecurityHelper {
         self.low.backup().import(version, recovery_key).await
     }
 
-            pub async fn backup_export_default(&self) -> Result<(RecoveryKey, BackupExportResult)> {
+    /// Generate a fresh [`RecoveryKey`] and export everything in one call.
+    ///
+    /// Returns `(recovery_key, result)`. **The caller must persist the
+    /// recovery key** — losing it means losing access to all backed-up
+    /// history.
+    pub async fn backup_export_default(&self) -> Result<(RecoveryKey, BackupExportResult)> {
         let rk = RecoveryKey::generate();
         let result = self.backup_export(&rk).await?;
         Ok((rk, result))
     }
 
+    /// List existing backup versions.
     pub async fn backup_versions(&self) -> Result<Vec<BackupVersion>> {
         self.low.backup().versions().await
     }
 
+    /// Fetch a backup version with all its items.
     pub async fn backup_get(&self, version: i32) -> Result<BackupVersionData> {
         self.low.backup().get(version).await
     }
 
+    /// Delete a backup version and all its items.
     pub async fn backup_delete(&self, version: i32) -> Result<()> {
         self.low.backup().delete(version).await
     }
 
-                        pub async fn invalidate_trust_cache(&self) {
+    /// Explicitly invalidate the Web-of-Trust cache.
+    ///
+    /// The agent invalidates the cache automatically on
+    /// [`crate::HighEvent::CrossSigningReset`], on incoming
+    /// `cross_signing_signature_added` events, and after successful SAS / QR
+    /// verification. Call this manually only if you upload USK signatures
+    /// directly via [`crate::api::low::helpers::LockNetCryptoHelper`] — the
+    /// server does not notify the signer about their own signatures.
+    pub async fn invalidate_trust_cache(&self) {
         let mut st = self.state.write().await;
         st.invalidate_trust_graph();
     }

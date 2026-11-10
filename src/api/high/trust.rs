@@ -1,3 +1,10 @@
+//! Web-of-Trust graph built from cross-signing signatures.
+//!
+//! A directed edge `A -> B` means "A's user-signing key (USK) has signed B's
+//! master signing key (MSK)". Trust is transitive: if A trusts B and B trusts
+//! C, A trusts C. The graph is validated locally — every edge requires a
+//! verifiable Ed25519 signature; the server cannot forge trust.
+
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::Arc;
 
@@ -5,13 +12,30 @@ use crate::api::low::agent::LockNetLowAgent;
 use crate::core::crypto::signature::verify_b64;
 use crate::core::errors::Result;
 
+/// Web-of-Trust graph.
+///
+/// Node = `user_id`, edge `A -> B` = `A.user_signing_key` signed
+/// `B.master_key`.
+///
+/// Built by [`TrustGraph::build`] from
+/// [`crate::api::low::helpers::LockNetCryptoHelper::query_cross_signing_keys`];
+/// every edge is verified with Ed25519, not trusted blindly.
 #[derive(Debug, Default, Clone)]
 pub struct TrustGraph {
     edges: HashMap<i64, HashSet<i64>>,
 }
 
 impl TrustGraph {
-                    pub async fn build(
+    /// Build a graph from the cross-signing keys of `user_ids`.
+    ///
+    /// Only edges with a valid Ed25519 signature are included. Missing keys
+    /// and invalid signatures are silently skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying `query_cross_signing_keys` call
+    /// fails (e.g. transport error, request timeout).
+    pub async fn build(
         low: &Arc<LockNetLowAgent>,
         user_ids: &[i64],
     ) -> Result<Self> {
@@ -35,6 +59,7 @@ impl TrustGraph {
                     Err(_) => continue,
                 };
 
+                // Self-signatures carry no trust information.
                 if signer_uid == *target_uid {
                     continue;
                 }
@@ -43,6 +68,7 @@ impl TrustGraph {
                     continue;
                 };
 
+                // We can only verify edges from signers we have keys for.
                 let Some(signer_entry) = query.get(&signer_uid) else {
                     continue;
                 };
@@ -59,7 +85,10 @@ impl TrustGraph {
         Ok(Self { edges })
     }
 
-            pub fn reachable_from(&self, from: i64) -> HashSet<i64> {
+    /// BFS from `from`: every `user_id` reachable via the trust chain.
+    ///
+    /// `from` is included (a user trusts themself by definition).
+    pub fn reachable_from(&self, from: i64) -> HashSet<i64> {
         let mut visited: HashSet<i64> = HashSet::new();
         visited.insert(from);
 
@@ -76,7 +105,9 @@ impl TrustGraph {
         visited
     }
 
-        #[allow(dead_code)]
+    /// Check for a direct edge only (no transitivity). Useful for tests and
+    /// debugging.
+    #[allow(dead_code)]
     pub fn has_direct(&self, from: i64, to: i64) -> bool {
         self.edges
             .get(&from)

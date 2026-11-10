@@ -1,3 +1,9 @@
+//! Megolm `group_key` fan-out.
+//!
+//! Called by [`crate::Chat`] when the outbound Megolm session changes or the
+//! group membership changes. Recipients are filtered by the group's
+//! [`crate::core::policies::MegolmRotationVisibility`] policy.
+
 use std::sync::Arc;
 
 use crate::api::low::agent::LockNetLowAgent;
@@ -6,6 +12,17 @@ use crate::core::errors::Result;
 use crate::core::policies::MegolmRotationVisibility;
 use super::security::SecurityHelper;
 
+/// Share the current Megolm key with eligible member sessions.
+///
+/// Iterates every session of every member (skipping the caller's current
+/// session — it already has the inbound key), filters by `policy`, and sends
+/// `ln.encryption.group_key` over Olm.
+///
+/// Returns the number of sessions that received the key.
+///
+/// # Errors
+///
+/// Propagates transport errors from `query_keys` or `send_to_device`.
 pub(crate) async fn fan_out_group_key(
     low: &Arc<LockNetLowAgent>,
     chat_id: i64,
@@ -25,6 +42,7 @@ pub(crate) async fn fan_out_group_key(
 
     let mut shared = 0usize;
     for uid in participant_ids {
+        // User-level gate: only for OnlyVerifiedUsers.
         if policy == MegolmRotationVisibility::OnlyVerifiedUsers
             && !security.is_user_verified(*uid).await
         {
@@ -40,6 +58,8 @@ pub(crate) async fn fan_out_group_key(
                 continue;
             }
 
+            // Session-level gate: for both OnlyVerifiedSessions and
+            // OnlyVerifiedUsers.
             if policy != MegolmRotationVisibility::AllMembers
                 && !security.is_session_verified(*uid, *sid).await
             {

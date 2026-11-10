@@ -1,3 +1,9 @@
+//! Internal cache and per-connection state for [`crate::LockNetAgent`].
+//!
+//! Tracks chats, users, invites, messages, verified sessions, pending
+//! decryptions, active flows (SAS, QR), and the Web-of-Trust cache. All
+//! access goes through the agent's `RwLock<ClientState>`.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -7,9 +13,14 @@ use crate::api::low::models as low_models;
 use super::models::{Group, GroupMember, Invite, Message, Reaction, User};
 use super::models::chat::PLAINTEXT_ALGORITHM;
 
+/// A pending SAS start from another session, waiting for
+/// [`crate::LockNetAgent`]'s user to accept or decline.
 #[derive(Debug, Clone)]
 pub(crate) struct PendingSasStart {
+    /// The user who sent the start, if resolvable from cache. `None` means we
+    /// will try to resolve it during `sas_accept`.
     pub from_user: Option<i64>,
+    /// The session that sent the start.
     pub from_session: i64,
 }
 
@@ -43,10 +54,18 @@ impl ClientState {
         }
     }
 
+    /// Resolve a user by ID, inserting a placeholder [`User::unknown`] if
+    /// not cached.
     pub fn resolve_user(&mut self, user_id: i64) -> User {
         self.users.entry(user_id).or_insert_with(|| User::unknown(user_id)).clone()
     }
 
+    /// Convert a wire [`low_models::Group`] into a domain [`Group`].
+    ///
+    /// If the server sends an `encrypted_group_data` blob newer than the
+    /// locally cached one, it is decrypted, anti-replay-checked, and stored.
+    /// Policy resolution may fail (missing key) — in that case,
+    /// [`Group::group_data`] stays `None` and safe defaults apply.
     pub async fn group_to_domain(
         &mut self,
         dto: &low_models::Group,
@@ -98,6 +117,7 @@ impl ClientState {
         }
     }
 
+    /// Convert a wire [`low_models::Message`] into a domain [`Message`].
     #[allow(dead_code)]
     pub fn message_to_domain(&mut self, dto: &low_models::Message, text: Option<String>) -> Message {
         Message {
@@ -111,6 +131,8 @@ impl ClientState {
         }
     }
 
+    /// Convert a wire [`low_models::MessageCreate`] (new message push) into a
+    /// domain [`Message`].
     pub fn message_create_to_domain(&mut self, dto: &low_models::MessageCreate, text: Option<String>) -> Message {
         Message {
             id: dto.message_id, chat_id: dto.chat_id, author: self.resolve_user(dto.author_id),
@@ -122,6 +144,10 @@ impl ClientState {
         }
     }
 
+    /// Convert a wire [`low_models::Invite`] into a domain [`Invite`].
+    ///
+    /// Uses the cached [`Group`] if available; otherwise builds a minimal
+    /// placeholder group with only the metadata from the invite.
     pub fn invite_to_domain(&mut self, dto: &low_models::Invite) -> Invite {
         let group = self.groups.get(&dto.group_id).cloned().unwrap_or_else(|| Group {
             id: dto.group_id, public_id: None, name: dto.group_name.clone(), is_public: false,
@@ -134,6 +160,8 @@ impl ClientState {
         Invite { id: dto.id, group, inviter, created_at: dto.created_at }
     }
 
+    /// Convert a wire [`low_models::GroupInviteCreated`] (push) into a
+    /// domain [`Invite`].
     pub fn invite_from_push(&mut self, dto: &low_models::GroupInviteCreated) -> Invite {
         let group = self.groups.get(&dto.group_id).cloned().unwrap_or_else(|| Group {
             id: dto.group_id, public_id: None, name: dto.group_name.clone(), is_public: false,
@@ -146,6 +174,7 @@ impl ClientState {
         Invite { id: dto.invite_id, group, inviter, created_at: dto.created_at }
     }
 
+    /// Mark `message_id` as pending decryption in `chat_id`.
     pub fn push_pending_decrypt(&mut self, chat_id: i64, message_id: i64) {
         let list = self.pending_decrypt.entry(chat_id).or_default();
         if !list.contains(&message_id) {
@@ -153,15 +182,19 @@ impl ClientState {
         }
     }
 
+    /// All message IDs pending decryption in `chat_id`.
     pub fn pending_decrypt_for(&self, chat_id: i64) -> Vec<i64> {
         self.pending_decrypt.get(&chat_id).cloned().unwrap_or_default()
     }
 
+    /// Clear the pending-decryption list for `chat_id`.
     pub fn clear_pending_decrypt(&mut self, chat_id: i64) {
         self.pending_decrypt.remove(&chat_id);
     }
 
-            pub fn retain_pending_decrypt<F: Fn(i64) -> bool>(&mut self, chat_id: i64, keep: F) {
+    /// Retain only those pending message IDs for which `keep(mid) == true`.
+    /// Removes the entry entirely if the list becomes empty.
+    pub fn retain_pending_decrypt<F: Fn(i64) -> bool>(&mut self, chat_id: i64, keep: F) {
         if let Some(list) = self.pending_decrypt.get_mut(&chat_id) {
             list.retain(|mid| keep(*mid));
             if list.is_empty() {
@@ -175,14 +208,18 @@ impl ClientState {
         self.groups.get(&chat_id).map(|g| g.created_by)
     }
 
+    /// Invalidate the Web-of-Trust cache. The next
+    /// [`crate::SecurityHelper::is_user_verified`] call will rebuild the graph.
     pub fn invalidate_trust_graph(&mut self) {
         self.reachable_users = None;
     }
 
+    /// Cached set of users reachable via the Web of Trust, if computed.
     pub fn cached_reachable(&self) -> Option<&HashSet<i64>> {
         self.reachable_users.as_ref()
     }
 
+    /// Store the computed reachable set.
     pub fn set_reachable(&mut self, set: HashSet<i64>) {
         self.reachable_users = Some(set);
     }
