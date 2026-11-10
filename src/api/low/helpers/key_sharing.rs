@@ -1,3 +1,5 @@
+//! `ln.encryption.key_request` flow.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -16,15 +18,31 @@ const LN_GROUP_KEY: &str = "ln.encryption.group_key";
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(60);
 
-
+/// An `ln.encryption.key_request` received from another session.
 #[derive(Debug, Clone)]
 pub struct IncomingKeyRequest {
+    /// Transaction ID assigned by the requester.
     pub transaction_id: String,
+    /// The requesting session.
     pub from_session: i64,
+    /// Chats the requester wants keys for.
     pub chat_ids: Vec<i64>,
+    /// `"chat_id:megolm_session_id"` items the requester already has.
     pub have: Vec<String>,
 }
 
+/// Wraps the responder and requester sides of `ln.encryption.key_request`.
+///
+/// Obtained via [`crate::LockNetLowAgent::key_sharing`].
+///
+/// **Two users on the same client:**
+///
+/// - Low-level tests and standalone flows use [`Self::request`], which returns
+///   a [`KeyRequestFlow`] that decrypts incoming payloads itself.
+/// - In a running [`crate::LockNetAgent`], only the agent should decrypt
+///   `to_device` events. Use [`Self::send_request_only`] and listen to
+///   `HighEvent::KeyRequest*` instead — otherwise both will compete for the
+///   stateful Olm session.
 pub struct LockNetKeySharingHelper {
     pub(crate) event_tx: broadcast::Sender<Event>,
     pub(crate) olm: Arc<LockNetOlmHelper>,
@@ -33,6 +51,7 @@ pub struct LockNetKeySharingHelper {
 }
 
 impl LockNetKeySharingHelper {
+    /// Build a standalone requester flow (see the struct docs for caveats).
     pub async fn request(
         &self,
         to_user: i64,
@@ -51,7 +70,12 @@ impl LockNetKeySharingHelper {
         .await
     }
 
-                        pub async fn send_request_only(
+    /// Send `ln.encryption.key_request` and return the transaction ID.
+    ///
+    /// Does **not** subscribe to events: the caller is expected to listen to
+    /// `HighEvent::KeyRequest{Imported,Done,Denied}`, emitted by
+    /// [`crate::LockNetAgent`] after it has decrypted the reply.
+    pub async fn send_request_only(
         &self,
         to_user: i64,
         to_session: i64,
@@ -87,7 +111,10 @@ impl LockNetKeySharingHelper {
         Ok(txid)
     }
 
-                pub async fn wait_request(
+    /// Wait for the first `ln.encryption.key_request`.
+    ///
+    /// `rx` must be subscribed **before** the peer sends the request.
+    pub async fn wait_request(
         &self,
         rx: &mut broadcast::Receiver<Event>,
         timeout: Duration,
@@ -133,6 +160,8 @@ impl LockNetKeySharingHelper {
         }
     }
 
+    /// Send one `ln.encryption.group_key` reply (with the shared
+    /// `group_data` blob, if any).
     pub async fn send_group_key(
         &self,
         to_user: i64,
@@ -156,6 +185,7 @@ impl LockNetKeySharingHelper {
         self.olm.send(to_user, to_session, pt).wait().await
     }
 
+    /// Send `ln.encryption.key_request_done`.
     pub async fn send_done(
         &self,
         to_user: i64,
@@ -173,6 +203,7 @@ impl LockNetKeySharingHelper {
         self.olm.send(to_user, to_session, content.to_string()).wait().await
     }
 
+    /// Send `ln.encryption.key_denied`.
     pub async fn send_denied(
         &self,
         to_user: i64,
@@ -191,19 +222,27 @@ impl LockNetKeySharingHelper {
     }
 }
 
-
+/// A single step of a requester flow.
 #[derive(Debug)]
 pub enum KeyRequestStep {
+    /// One `group_key` was received and imported.
     GroupKeyImported {
+        /// Chat the key belongs to.
         chat_id: i64,
+        /// Megolm session ID.
         megolm_session_id: String,
     },
+    /// The responder finished sending keys.
     Done {
+        /// Total keys imported in this flow.
         total_imported: u32,
     },
+    /// The responder refused.
     Denied {
+        /// Reason sent by the responder.
         reason: String,
     },
+    /// The flow was cancelled locally.
     Cancelled(String),
 }
 
@@ -215,6 +254,13 @@ enum InternalState {
     Cancelled(String),
 }
 
+/// Standalone requester flow.
+///
+/// **Warning:** this flow decrypts incoming `to_device` payloads directly.
+/// If a [`crate::LockNetAgent`] is running on the same client, it will also
+/// try to decrypt those payloads and the two will race for the stateful Olm
+/// session. Use [`LockNetKeySharingHelper::send_request_only`] when an agent
+/// is running.
 pub struct KeyRequestFlow {
     txid: String,
     #[allow(dead_code)]
@@ -278,10 +324,21 @@ impl KeyRequestFlow {
         })
     }
 
+    /// Transaction ID of this request.
     pub fn transaction_id(&self) -> &str { &self.txid }
+
+    /// Chats requested in this flow.
     pub fn chat_ids(&self) -> &[i64] { &self.chat_ids }
+
+    /// Number of keys imported so far.
     pub fn imported_count(&self) -> u32 { self.imported_count }
 
+    /// Advance the flow by one step.
+    ///
+    /// Blocks until the next `group_key`, `done`, or `denied` message
+    /// arrives. Returns the terminal state ([`KeyRequestStep::Done`],
+    /// [`KeyRequestStep::Denied`], [`KeyRequestStep::Cancelled`]) once
+    /// reached; subsequent calls return it again.
     pub async fn next(&mut self) -> Result<KeyRequestStep> {
         match self.state.clone() {
             InternalState::Done { total } => return Ok(KeyRequestStep::Done { total_imported: total }),
@@ -372,6 +429,7 @@ impl KeyRequestFlow {
         }
     }
 
+    /// Cancel the flow locally.
     pub async fn cancel(&mut self) -> Result<()> {
         if matches!(
             self.state,

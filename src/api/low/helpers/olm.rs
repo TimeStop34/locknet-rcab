@@ -1,3 +1,5 @@
+//! Olm (1-to-1) send and decrypt.
+
 use std::sync::Arc;
 use serde_json::json;
 use crate::api::low::command::{dispatch, CmdSender};
@@ -10,15 +12,34 @@ use crate::core::crypto::CryptoStore;
 use crate::core::errors::{LockNetError, Result};
 use crate::core::flow::SimpleFlow;
 
+/// Wraps Olm encryption with the appropriate `send_to_device` wire calls.
+///
+/// Obtained via [`crate::LockNetLowAgent::olm`].
 pub struct LockNetOlmHelper { pub(crate) cmd_tx: CmdSender, pub(crate) store: Arc<dyn CryptoStore> }
 
 impl LockNetOlmHelper {
+    /// Encrypt `plaintext` and send it to a specific device.
+    ///
+    /// If an established Olm session with `to_session_id` exists, it is
+    /// reused (and the ratchet advances). Otherwise a new outbound session
+    /// is created via [`crate::api::low::helpers::LockNetKeysHelper::claim_one_time_key`].
+    ///
+    /// Returns a [`SimpleFlow`]: await it with `.wait().await` or poll it as
+    /// a `Future`.
     pub fn send(&self, to_user_id: i64, to_session_id: i64, plaintext: impl Into<String> + Send + 'static) -> SimpleFlow<()> {
         let cmd_tx = self.cmd_tx.clone();
         let store = self.store.clone();
         let plaintext = plaintext.into();
         SimpleFlow::spawn(async move { send_impl(cmd_tx, store, to_user_id, to_session_id, plaintext).await })
     }
+
+    /// Decrypt a `to_device` payload addressed to the current device.
+    ///
+    /// Tries every known Olm session with the sender's session ID; if none
+    /// decrypts and the message is a pre-key, creates a new inbound session.
+    ///
+    /// Returns `Some(plaintext)` on success, `None` if the message type is
+    /// unknown or the session cannot be built.
     pub fn decrypt(&self, payload: ToDevicePayload) -> SimpleFlow<Option<String>> {
         let store = self.store.clone();
         SimpleFlow::spawn(async move { decrypt_impl(store, payload).await })
@@ -28,6 +49,8 @@ impl LockNetOlmHelper {
 async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i64, to_session_id: i64, plaintext: String) -> Result<()> {
     let entries = store.olm_sessions(to_session_id).await;
 
+    // Prefer sessions that have already received a reply: they encrypt as
+    // NormalMessage (type=1) and do not consume a new OTK on the peer.
     for entry in entries.iter().rev() {
         let mut session = entry.session.lock().await;
         if !session.has_received_message() {
@@ -47,6 +70,7 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
         return Ok(());
     }
 
+    // Otherwise reuse the most recent outbound session (PreKey until ack).
     if let Some(entry) = entries.last() {
         let mut session = entry.session.lock().await;
         let encrypted = encrypt_olm(&mut session, &plaintext);
@@ -63,6 +87,7 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
         return Ok(());
     }
 
+    // No session yet — claim an OTK and create one.
     let keys: QueryKeysResult = dispatch(&cmd_tx, json!({ "type": "query_keys", "data": { "user_ids": [to_user_id] } })).await?;
     let their_curve = keys.get(&to_user_id).and_then(|m| m.get(&to_session_id)).map(|d| d.curve25519_key.clone())
         .ok_or_else(|| LockNetError::InvalidResponse("recipient device not found".into()))?;

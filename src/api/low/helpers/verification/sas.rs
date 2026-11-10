@@ -1,3 +1,5 @@
+//! SAS (emoji) verification flow.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -31,26 +33,42 @@ const SAS_EMOJI: [(&str, &str); 64] = [
     ("🔔","Bell"),("⚓","Anchor"),("🎧","Headphones"),("📁","Folder"),("📌","Pin"),("✂️","Scissors"),("🔐","Lock with Key"),("🔓","Unlocked"),
 ];
 
+/// One emoji from the SAS string.
 #[derive(Debug, Clone)]
-pub struct SasEmoji { pub symbol: &'static str, pub name: &'static str }
+pub struct SasEmoji {
+    /// The emoji character.
+    pub symbol: &'static str,
+    /// Its name, for accessibility.
+    pub name: &'static str,
+}
 
+/// Current state of a [`SasFlow`].
 #[derive(Debug, Clone)]
 pub enum SasStatus {
+    /// Initiator sent `start`; waiting for `accept`.
     WaitingAccept,
+    /// Both sides exchanged keys; waiting for the peer's `key`.
     WaitingKey,
+    /// Emoji are ready; waiting for [`SasFlow::confirm_emoji`].
     NeedUserConfirmation { emoji: Vec<SasEmoji> },
+    /// Emoji confirmed by both sides; waiting for peer's MAC.
     WaitingMac,
+    /// MAC verified successfully.
     Verified,
+    /// Flow was cancelled (peer rejected, MAC mismatch, or `abort`).
     Cancelled(String),
 }
 
+/// Result of [`SasFlow::next`].
 #[derive(Debug)]
 pub enum SasStep {
+    /// Emoji are ready; caller must call [`SasFlow::confirm_emoji`].
     Emoji(Vec<SasEmoji>),
+    /// Both sides verified their MACs; peer is now trusted.
     Verified,
+    /// Flow was cancelled.
     Cancelled(String),
 }
-
 
 struct SasHandshake {
     our_secret: StaticSecret,
@@ -100,15 +118,13 @@ impl SasHandshake {
         Ok(okm)
     }
 
-        fn calculate_mac(&self, input: &[u8], info: &[u8]) -> Result<[u8; 32]> {
+    fn calculate_mac(&self, input: &[u8], info: &[u8]) -> Result<[u8; 32]> {
         use hmac::{Hmac, Mac};
         let shared = self.shared_bytes()?;
-
         let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), &shared);
         let mut key = [0u8; 32];
         hk.expand(info, &mut key)
             .map_err(|e| LockNetError::InvalidResponse(format!("hkdf calculate_mac key: {e}")))?;
-
         let mut mac = <Hmac<Sha256> as Mac>::new_from_slice(&key)
             .map_err(|e| LockNetError::InvalidResponse(format!("hmac key: {e}")))?;
         mac.update(input);
@@ -136,7 +152,15 @@ fn emoji_indices(bytes: &[u8]) -> [u8; 7] {
     out
 }
 
-
+/// A single SAS verification flow.
+///
+/// Created by [`crate::api::low::helpers::verification::LockNetVerificationHelper::sas_start`]
+/// (initiator) or `sas_start_responder` (responder). Drive it with
+/// [`Self::next`] and [`Self::confirm_emoji`].
+///
+/// The wire protocol is `ln.encryption.key.verification.{start,accept,key,mac}`,
+/// all sent through the Olm channel. The shared secret is X25519 (ephemeral);
+/// emoji and MACs are derived from it with HKDF-SHA256.
 pub struct SasFlow {
     txid: String,
     to_user: i64,
@@ -153,6 +177,10 @@ pub struct SasFlow {
 }
 
 impl SasFlow {
+    /// Start a new flow as the initiator.
+    ///
+    /// Sends `ln.encryption.key.verification.start` immediately. The flow
+    /// then waits for `accept` from the peer.
     pub async fn start(
         olm: Arc<LockNetOlmHelper>,
         event_rx: broadcast::Receiver<Event>,
@@ -189,6 +217,10 @@ impl SasFlow {
         Ok(flow)
     }
 
+    /// Start a flow as the responder to an incoming `start`.
+    ///
+    /// Immediately sends `accept` and `key`. The flow then waits for the
+    /// peer's `key`.
     pub async fn start_as_responder(
         olm: Arc<LockNetOlmHelper>,
         event_rx: broadcast::Receiver<Event>,
@@ -217,15 +249,35 @@ impl SasFlow {
         Ok(flow)
     }
 
+    /// Transaction ID of this flow.
     pub fn transaction_id(&self) -> &str { &self.txid }
+
+    /// Current status.
     pub fn check_status(&self) -> SasStatus { self.status.clone() }
+
+    /// Computed emoji, if the flow has reached [`SasStatus::NeedUserConfirmation`].
     pub fn emoji(&self) -> Option<&[SasEmoji]> { self.computed_emoji.as_deref() }
 
+    /// Set the peer's public keys (ed25519 identity + cross-signing MSK).
+    ///
+    /// Required before [`Self::confirm_emoji`] — the MAC verification needs
+    /// both to recompute the peer's MACs and detect MITM.
     pub fn set_peer_keys(&mut self, peer_ed25519_b64: String, peer_msk_b64: String) {
         self.peer_ed25519_b64 = Some(peer_ed25519_b64);
         self.peer_msk_b64 = Some(peer_msk_b64);
     }
 
+    /// Drive the flow one step forward.
+    ///
+    /// Returns [`SasStep::Emoji`] once the emoji are ready, then
+    /// [`SasStep::Verified`] (or [`SasStep::Cancelled`]) after
+    /// [`Self::confirm_emoji`] and the peer's MAC have been exchanged.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Timeout`] if the peer does not respond within 30s.
+    /// - [`LockNetError::RunnerDown`] if the Olm channel is closed.
+    /// - [`LockNetError::InvalidResponse`] on malformed peer messages.
     pub async fn next(&mut self) -> Result<SasStep> {
         loop {
             match &self.status {
@@ -262,6 +314,13 @@ impl SasFlow {
         }
     }
 
+    /// Confirm (or reject) the emoji, sending our MAC in the accept case.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if called before the emoji are
+    ///   ready, or if [`Self::set_peer_keys`] has not been called for the
+    ///   accept case.
     pub async fn confirm_emoji(&mut self, accept: bool) -> Result<()> {
         if !matches!(self.status, SasStatus::NeedUserConfirmation { .. }) {
             return Err(LockNetError::InvalidArgument(
@@ -282,6 +341,7 @@ impl SasFlow {
         Ok(())
     }
 
+    /// Abort the flow, marking it as cancelled.
     pub async fn abort(&mut self) -> Result<()> {
         self.status = SasStatus::Cancelled("aborted".into());
         Ok(())
@@ -444,9 +504,5 @@ fn normalize_b64(s: &str) -> String {
 fn generate_txid() -> String {
     let mut bytes = [0u8; 8];
     getrandom::getrandom(&mut bytes).expect("getrandom");
-    hex_encode(&bytes)
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }

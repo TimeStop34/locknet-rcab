@@ -1,27 +1,98 @@
+//! Server-pushed events.
+//!
+//! Everything the server pushes that is **not** a direct reply to a pending
+//! request lands here, is deserialized by `Event::parse`, and is forwarded
+//! on the broadcast channel returned by
+//! [`crate::LockNetLowAgent::subscribe`].
+//!
+//! Unknown or malformed events are reported as [`Event::Unknown`] instead of
+//! being dropped, so callers can log or inspect them.
+
 use serde_json::Value;
 use super::models::*;
 
+/// A server-pushed event.
+///
+/// Marked `#[non_exhaustive]`: new variants may be added in future releases
+/// without a breaking change.
 #[non_exhaustive]
 #[derive(Debug, Clone)]
 pub enum Event {
+    /// A new message was created.
     MessageCreate(MessageCreate),
+
+    /// A message was edited.
     MessageUpdate(MessageUpdate),
+
+    /// A message was soft-deleted (still appears in history with
+    /// `deleted = true`).
     MessageDelete(MessageDelete),
+
+    /// A reaction was added to a message.
     ReactionAdd(ReactionAdd),
+
+    /// A reaction was removed from a message.
     ReactionRemove(ReactionRemove),
+
+    /// A group was created.
     GroupCreated(GroupCreated),
+
+    /// An invitation to a group was created for this user.
     GroupInviteCreated(GroupInviteCreated),
+
+    /// The membership of a group changed (someone joined or left).
     GroupMembershipChanged(GroupMembershipChanged),
-    GroupDataUpdated { group_id: i64 },
+
+    /// The `encrypted_group_data` blob of a group was updated.
+    ///
+    /// Callers that cached the group must re-fetch it (for example, via
+    /// [`crate::LockNetAgent::chat`]) to pick up the new policy.
+    GroupDataUpdated {
+        /// ID of the affected group.
+        group_id: i64,
+    },
+
+    /// An encrypted `to-device` payload (Olm).
+    ///
+    /// Contains encrypted key material, verification messages, or other
+    /// end-to-end data addressed to this device.
     ToDevice(ToDevicePayload),
+
+    /// Another user added a USK signature on someone's MSK.
     CrossSigningSignatureAdded(CrossSigningSignatureAdded),
+
+    /// Cross-signing keys were reset; cached trust data is stale.
     CrossSigningReset(CrossSigningReset),
+
+    /// The runner successfully reconnected after a disconnect.
     Reconnected,
+
+    /// The session expired and could not be refreshed; re-authenticate via
+    /// [`crate::Credentials::Session`].
     SessionExpired,
-    Unknown { event_type: String, data: Value },
+
+    /// Unrecognized or malformed event.
+    ///
+    /// `event_type` is the value of the `type` field from the envelope (empty
+    /// string if missing). `data` is the raw `data` field, or `null` if the
+    /// payload failed to deserialize.
+    Unknown {
+        /// Event type as sent by the server.
+        event_type: String,
+        /// Raw payload (or `null` on parse failure).
+        data: Value,
+    },
 }
 
 impl Event {
+    /// Parse a raw server envelope into an [`Event`].
+    ///
+    /// Envelope shape: `{"type": "...", "data": {...}}` for pushes, or
+    /// `{"type": "_ok", "id": "...", "data": {...}}` for replies (replies are
+    /// handled before this function is called).
+    ///
+    /// Never panics: unknown types and malformed payloads become
+    /// [`Event::Unknown`].
     pub(crate) fn parse(envelope: Value) -> Self {
         let event_type = envelope.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string();
         let data = envelope.get("data").cloned().unwrap_or(Value::Null);
@@ -36,6 +107,10 @@ impl Event {
             "group_invite_created" => serde_json::from_value(data).map(Event::GroupInviteCreated).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "group_membership_changed" => serde_json::from_value(data).map(Event::GroupMembershipChanged).unwrap_or_else(|_| Event::Unknown { event_type, data: Value::Null }),
             "group_data_updated" => {
+                // `group_id == 0` is not a valid snowflake. A server should
+                // never send it; if it does (malformed or old format), treat
+                // it as `Unknown` rather than emit `GroupDataUpdated { group_id: 0 }`
+                // which would later reach `info(0)` and fail with `not_found`.
                 match data.get("group_id").and_then(|v| v.as_i64()) {
                     Some(id) if id != 0 => Event::GroupDataUpdated { group_id: id },
                     _ => Event::Unknown { event_type, data },
@@ -58,6 +133,7 @@ mod tests {
         Event::parse(v)
     }
 
+    // ---- message_create ----
 
     #[test]
     fn parse_message_create_ok() {
@@ -120,6 +196,7 @@ mod tests {
         }
     }
 
+    // ---- group_data_updated ----
 
     #[test]
     fn parse_group_data_updated_ok() {
@@ -160,6 +237,7 @@ mod tests {
         }
     }
 
+    // ---- error ----
 
     #[test]
     fn parse_error_becomes_unknown() {
@@ -186,6 +264,7 @@ mod tests {
         }
     }
 
+    // ---- unknown / malformed ----
 
     #[test]
     fn parse_unknown_type_preserves_event_type_and_data() {
@@ -220,6 +299,7 @@ mod tests {
         }
     }
 
+    // ---- group_membership_changed / reaction_add ----
 
     #[test]
     fn parse_membership_changed_ok() {

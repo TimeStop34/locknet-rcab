@@ -1,3 +1,5 @@
+//! Encrypted key backup: wire methods and export/import flows.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -17,35 +19,60 @@ use crate::core::errors::{LockNetError, Result};
 const BACKUP_ALGORITHM: &str = "ln.encryption.backup.v1";
 const BACKUP_HKDF_INFO: &[u8] = b"LOCKNET_ENCRYPTION_BACKUP_V1";
 
-
+/// 32-byte secret used to encrypt the key backup.
+///
+/// The user must save this key out-of-band (password manager, paper, etc.).
+/// **Losing it means losing access to all backed-up Megolm history.**
+///
+/// # Examples
+///
+/// ```rust
+/// use locknet_rcab::RecoveryKey;
+///
+/// let key = RecoveryKey::generate();
+/// let encoded = key.to_base64();
+/// let decoded = RecoveryKey::from_base64(&encoded).unwrap();
+/// assert_eq!(key.as_bytes(), decoded.as_bytes());
+/// ```
 #[derive(Clone)]
 pub struct RecoveryKey([u8; 32]);
 
 impl std::fmt::Debug for RecoveryKey {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Never print the secret bytes.
         write!(f, "RecoveryKey(<redacted 32 bytes>)")
     }
 }
 
 impl RecoveryKey {
+    /// Generate a new random recovery key.
     pub fn generate() -> Self {
         let mut bytes = [0u8; 32];
         getrandom::getrandom(&mut bytes).expect("getrandom");
         Self(bytes)
     }
 
+    /// Wrap raw bytes.
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    /// Borrow the raw bytes.
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 
+    /// Encode as base64 (unpadded).
     pub fn to_base64(&self) -> String {
         b64_no_pad(&self.0)
     }
 
+    /// Decode from base64.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LockNetError::InvalidArgument`] if the input is not valid
+    /// base64 or does not decode to exactly 32 bytes.
     pub fn from_base64(s: &str) -> Result<Self> {
         let bytes = decode_b64(s).map_err(|_| {
             LockNetError::InvalidArgument("recovery key: invalid base64".into())
@@ -62,20 +89,28 @@ impl RecoveryKey {
     }
 }
 
-
+/// Result of [`LockNetBackupHelper::export`].
 #[derive(Debug, Clone)]
 pub struct BackupExportResult {
+    /// Server-side version created for this backup.
     pub version: i32,
+    /// Number of Megolm sessions uploaded.
     pub items_uploaded: u32,
 }
 
+/// Result of [`LockNetBackupHelper::import`].
 #[derive(Debug, Clone)]
 pub struct BackupImportResult {
+    /// Backup version that was imported.
     pub version: i32,
+    /// Number of Megolm sessions restored into the local store.
     pub sessions_imported: u32,
 }
 
-
+/// Wraps the `/api/v1/backup` WebSocket methods and implements the
+/// encrypt/decrypt flow.
+///
+/// Obtained via [`crate::LockNetLowAgent::backup`].
 pub struct LockNetBackupHelper {
     pub(crate) cmd_tx: CmdSender,
     pub(crate) store: Arc<dyn CryptoStore>,
@@ -83,7 +118,7 @@ pub struct LockNetBackupHelper {
 }
 
 impl LockNetBackupHelper {
-
+    /// List existing backup versions for the current user.
     pub async fn versions(&self) -> Result<Vec<BackupVersion>> {
         #[derive(serde::Deserialize)]
         struct W {
@@ -93,6 +128,10 @@ impl LockNetBackupHelper {
         Ok(w.versions)
     }
 
+    /// Create a new (empty) backup version.
+    ///
+    /// `auth_data` must include a `public_key` field derived from the
+    /// recovery key (see [`Self::export`]). Returns the new version number.
     pub async fn new_version(
         &self,
         algorithm: impl Into<String>,
@@ -110,6 +149,10 @@ impl LockNetBackupHelper {
         Ok(w.version)
     }
 
+    /// Upload encrypted backup items.
+    ///
+    /// `items` maps `"<chat_id>:<megolm_session_id>"` to an opaque encrypted
+    /// blob. Existing items with the same ID are overwritten.
     pub async fn put(
         &self,
         version: i32,
@@ -127,16 +170,34 @@ impl LockNetBackupHelper {
         Ok(w.count)
     }
 
+    /// Fetch a backup version with all its items.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::LockNetError::Server`] with code `backup_version_not_found`.
     pub async fn get(&self, version: i32) -> Result<BackupVersionData> {
         dispatch(&self.cmd_tx, json!({ "type": "backup_get", "data": { "version": version } })).await
     }
 
+    /// Delete a backup version and all its items.
     pub async fn delete(&self, version: i32) -> Result<()> {
         dispatch_unit(&self.cmd_tx, json!({ "type": "backup_delete", "data": { "version": version } })).await
     }
 
-
-                pub async fn export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
+    /// Export every known Megolm inbound session to a new backup version.
+    ///
+    /// Each session is encrypted with XSalsa20-Poly1305 using a key derived
+    /// from `recovery_key`. The `auth_data.public_key` field stores a SHA-256
+    /// fingerprint of the derived key, allowing import to detect wrong
+    /// recovery keys before attempting decryption.
+    ///
+    /// Returns the new version number and the count of uploaded sessions.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::LockNetError::Timeout`] on transport timeout.
+    /// - [`crate::LockNetError::InvalidResponse`] on malformed server response.
+    pub async fn export(&self, recovery_key: &RecoveryKey) -> Result<BackupExportResult> {
         let secret = derive_backup_secret(recovery_key)?;
         let public_key = b64_no_pad(&sha256_bytes(&secret));
 
@@ -178,7 +239,17 @@ impl LockNetBackupHelper {
         Ok(BackupExportResult { version, items_uploaded: uploaded })
     }
 
-            pub async fn import(
+    /// Import all Megolm sessions from a backup version.
+    ///
+    /// Verifies that `recovery_key` matches the fingerprint stored in
+    /// `auth_data.public_key` before decrypting any item.
+    ///
+    /// # Errors
+    ///
+    /// - [`crate::LockNetError::Server`] with code `backup_version_not_found`.
+    /// - [`LockNetError::InvalidArgument`] if `recovery_key` does not match
+    ///   the backup's `auth_data.public_key`.
+    pub async fn import(
         &self,
         version: i32,
         recovery_key: &RecoveryKey,
@@ -232,6 +303,7 @@ impl LockNetBackupHelper {
     }
 }
 
+// ---- crypto helpers ----
 
 fn derive_backup_secret(rk: &RecoveryKey) -> Result<[u8; 32]> {
     let hk = Hkdf::<Sha256>::new(Some(&[0u8; 32]), rk.as_bytes());

@@ -1,3 +1,5 @@
+//! QR-code verification flow.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -22,10 +24,18 @@ const QR_MAC: &str = "ln.encryption.key.verification.qr.mac";
 
 const QR_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 
+/// Verification mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum QrMode {
+    /// User-to-user verification. MAC covers each side's MSK.
     UserToUser,
+    /// Self-device verification where the MSK is already trusted.
+    /// MAC covers each device's ed25519.
     SelfDeviceTrusted,
+    /// Self-device verification where the MSK is not yet trusted.
+    /// Cryptographically identical to [`QrMode::SelfDeviceTrusted`]; the
+    /// difference is semantic (whether the MSK is promoted to trusted on
+    /// success).
     SelfDeviceUntrusted,
 }
 
@@ -47,7 +57,7 @@ impl QrMode {
         }
     }
 
-            fn mac_target(self) -> MacTarget {
+    fn mac_target(self) -> MacTarget {
         match self {
             QrMode::UserToUser => MacTarget::MasterKey,
             QrMode::SelfDeviceTrusted | QrMode::SelfDeviceUntrusted => MacTarget::Ed25519,
@@ -61,18 +71,26 @@ enum MacTarget {
     Ed25519,
 }
 
+/// A QR code to render for display.
 #[derive(Debug, Clone)]
 pub struct QrCode {
+    /// Verification mode.
     pub mode: QrMode,
+    /// Transaction ID.
     pub transaction_id: String,
+    /// Raw QR string (`LockNetProtocol;v1.0;<mode>;<txid>;<eph_pub_b64>;<secret_b64>`).
     pub raw: String,
 }
 
+/// Result of a [`QrFlow`] step.
 #[derive(Debug)]
 pub enum QrStep {
-            Confirmed,
-        Verified,
-        Cancelled(String),
+    /// Handshake finished; call [`QrFlow::exchange_mac`] next.
+    Confirmed,
+    /// Peer's MAC verified; verification is complete.
+    Verified,
+    /// Flow was cancelled (secret mismatch, MAC mismatch, or `cancel`).
+    Cancelled(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -90,6 +108,15 @@ enum InternalState {
     Cancelled(String),
 }
 
+/// A single QR verification flow.
+///
+/// Created by [`crate::api::low::helpers::verification::LockNetVerificationHelper::qr_display`]
+/// (displayer) or `qr_scan` (scanner). Drive it with [`Self::next`] and
+/// [`Self::exchange_mac`].
+///
+/// The wire protocol is `ln.encryption.key.verification.qr.{scanned,confirm,mac}`,
+/// sent through the Olm channel. The shared secret is X25519 using an
+/// ephemeral key on each side.
 pub struct QrFlow {
     txid: String,
     mode: QrMode,
@@ -103,7 +130,6 @@ pub struct QrFlow {
     peer_eph_pub: Option<PublicKey>,
     shared: Option<[u8; 32]>,
     mac_key: Option<[u8; 32]>,
-
     scan_secret: Option<[u8; 8]>,
 
     olm: Arc<LockNetOlmHelper>,
@@ -112,7 +138,10 @@ pub struct QrFlow {
 }
 
 impl QrFlow {
-            pub async fn display(
+    /// Start as the **displayer** (the side that shows the QR code).
+    ///
+    /// Returns the QR string to render and a flow in `WaitingScanned` state.
+    pub async fn display(
         mode: QrMode,
         olm: Arc<LockNetOlmHelper>,
         event_rx: broadcast::Receiver<Event>,
@@ -151,7 +180,15 @@ impl QrFlow {
         Ok((code, flow))
     }
 
-            pub async fn scan(
+    /// Start as the **scanner** (the side that scans the QR code).
+    ///
+    /// Immediately sends `qr.scanned` to the displayer. The returned flow
+    /// is in `WaitingConfirm` state.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if `qr_raw` is malformed.
+    pub async fn scan(
         qr_raw: &str,
         olm: Arc<LockNetOlmHelper>,
         event_rx: broadcast::Receiver<Event>,
@@ -192,11 +229,30 @@ impl QrFlow {
         Ok(flow)
     }
 
+    /// Transaction ID of this flow.
     pub fn transaction_id(&self) -> &str { &self.txid }
+
+    /// Verification mode.
     pub fn mode(&self) -> QrMode { self.mode }
+
+    /// Derived MAC key, once the handshake is complete.
     pub fn mac_key(&self) -> Option<&[u8; 32]> { self.mac_key.as_ref() }
 
-                        pub async fn next(&mut self) -> Result<QrStep> {
+    /// Drive the flow one step forward.
+    ///
+    /// - Displayer: waits for `qr.scanned`, verifies the scan secret,
+    ///   computes the MAC key, sends `qr.confirm`. Returns [`QrStep::Confirmed`].
+    /// - Scanner: waits for `qr.confirm`, computes the MAC key. Returns
+    ///   [`QrStep::Confirmed`].
+    ///
+    /// Then call [`Self::exchange_mac`].
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Timeout`] if the peer does not respond (120s).
+    /// - [`LockNetError::RunnerDown`] if the Olm channel is closed.
+    /// - [`LockNetError::InvalidResponse`] on malformed peer messages.
+    pub async fn next(&mut self) -> Result<QrStep> {
         match self.state.clone() {
             InternalState::WaitingScanned => {
                 if self.role != QrRole::Displayer {
@@ -269,7 +325,17 @@ impl QrFlow {
         }
     }
 
-                        pub async fn exchange_mac(&mut self, peer_key_b64: String) -> Result<QrStep> {
+    /// Send our MAC and verify the peer's MAC.
+    ///
+    /// `peer_key_b64` is the key the peer MACs: for [`QrMode::UserToUser`],
+    /// the peer's MSK; for self-device modes, the peer's ed25519.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if called before the handshake
+    ///   completes.
+    /// - [`LockNetError::Timeout`] if the peer does not respond (120s).
+    pub async fn exchange_mac(&mut self, peer_key_b64: String) -> Result<QrStep> {
         if !matches!(self.state, InternalState::WaitingMac) {
             return Err(LockNetError::InvalidArgument(
                 "exchange_mac: not in WaitingMac state".into(),
@@ -312,6 +378,7 @@ impl QrFlow {
         Ok(QrStep::Verified)
     }
 
+    /// Cancel the flow locally.
     pub async fn cancel(&mut self) -> Result<()> {
         if matches!(self.state, InternalState::Done | InternalState::Cancelled(_)) {
             return Ok(());
@@ -319,7 +386,6 @@ impl QrFlow {
         self.state = InternalState::Cancelled("cancelled by user".into());
         Ok(())
     }
-
 
     async fn send_scanned(&self, our_eph_pub: &PublicKey, secret: &[u8; 8]) -> Result<()> {
         let content = json!({
@@ -352,7 +418,13 @@ impl QrFlow {
                     if let Some(pt) = self.olm.decrypt(payload).wait().await? {
                         if let Ok(val) = serde_json::from_str::<Value>(&pt) {
                             if val.get("type").and_then(|v| v.as_str()) == Some(expected_type) {
-                                return Ok(val.get("content").cloned().unwrap_or(Value::Null));
+                                let txid = val
+                                    .pointer("/content/transaction_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if txid == self.txid {
+                                    return Ok(val.get("content").cloned().unwrap_or(Value::Null));
+                                }
                             }
                         }
                     }
@@ -364,7 +436,6 @@ impl QrFlow {
         }
     }
 }
-
 
 fn qr_generate(mode: QrMode, txid: &str) -> (String, StaticSecret, [u8; 8]) {
     let mut sk_bytes = [0u8; 32];

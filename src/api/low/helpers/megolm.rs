@@ -1,3 +1,5 @@
+//! Megolm (group) sessions, rotation, and `group_key` payload handling.
+
 use std::sync::Arc;
 use serde_json::json;
 use tokio::sync::Mutex;
@@ -9,12 +11,20 @@ use crate::core::errors::{LockNetError, Result};
 use crate::core::policies::MegolmOutboundMeta;
 use crate::api::low::helpers::olm::LockNetOlmHelper;
 
+/// Snapshot of the current outbound Megolm session for a chat.
 pub struct MegolmSessionInfo {
+    /// Chat ID.
     pub chat_id: i64,
+    /// Megolm session ID.
     pub megolm_session_id: String,
+    /// Base64-encoded session key, for sharing with other members.
     pub session_key: String,
 }
 
+/// Wraps Megolm session lifecycle and encryption.
+///
+/// Obtained via [`crate::LockNetLowAgent::megolm`]. Most callers use
+/// [`crate::Chat`] instead, which adds fan-out and policy handling.
 pub struct LockNetMegolmHelper {
     #[allow(dead_code)]
     pub(crate) cmd_tx: CmdSender,
@@ -28,6 +38,20 @@ pub struct LockNetMegolmHelper {
 }
 
 impl LockNetMegolmHelper {
+    /// Create a fresh outbound session for `chat_id`.
+    ///
+    /// If a session already exists, the new one replaces it and its
+    /// `GroupData.version` is incremented. A fresh `group_data_key` is
+    /// generated as well, so previously shared peers cannot read the new
+    /// policy until the new `group_key` is distributed.
+    ///
+    /// The inbound half is also stored locally, so the sender can decrypt
+    /// their own messages.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LockNetError::InvalidResponse`] on internal encryption errors
+    /// (should never happen with valid keys).
     pub async fn create(&self, chat_id: i64) -> Result<MegolmSessionInfo> {
         use crate::core::crypto::group_data::encrypt_group_data;
         use crate::core::policies::{GroupData, GroupDataState};
@@ -88,7 +112,12 @@ impl LockNetMegolmHelper {
         })
     }
 
-                                    pub async fn ensure_session(&self, chat_id: i64) -> Result<(MegolmSessionInfo, bool)> {
+    /// Return the current outbound session, creating one if needed, and
+    /// rotate it if the configured message-count or TTL threshold is reached.
+    ///
+    /// Returns `(info, was_rotated)`. `was_rotated = true` means the caller
+    /// must fan out the new key (see [`crate::Chat::send`]).
+    pub async fn ensure_session(&self, chat_id: i64) -> Result<(MegolmSessionInfo, bool)> {
         let existing = self.store.megolm_outbound(chat_id).await;
         let existing_key = self.store.megolm_outbound_key(chat_id).await;
         let meta = self.store.megolm_outbound_meta(chat_id).await;
@@ -130,10 +159,16 @@ impl LockNetMegolmHelper {
         Ok((info, true))
     }
 
+    /// Force a rotation regardless of thresholds.
     pub async fn rotate(&self, chat_id: i64) -> Result<MegolmSessionInfo> {
         self.create(chat_id).await
     }
 
+    /// Encrypt `plaintext` with the current outbound session for `chat_id`.
+    ///
+    /// Increments the message counter used by auto-rotation. If the counter
+    /// crosses the threshold, the next call to [`Self::ensure_session`] will
+    /// rotate.
     pub async fn encrypt(&self, chat_id: i64, plaintext: impl Into<String>) -> Result<Encrypted> {
         let session = self.store.megolm_outbound(chat_id).await
             .ok_or_else(|| LockNetError::InvalidResponse("no megolm session for chat".into()))?;
@@ -158,6 +193,11 @@ impl LockNetMegolmHelper {
         })
     }
 
+    /// Decrypt a Megolm ciphertext with a known inbound session.
+    ///
+    /// Returns `Ok(None)` if no inbound session is known for
+    /// `encrypted.megolm_session_id`, or if `encrypted.algorithm` is not
+    /// [`MEGOLM_ALGORITHM`].
     pub async fn decrypt(&self, chat_id: i64, encrypted: &Encrypted) -> Result<Option<String>> {
         if encrypted.algorithm != MEGOLM_ALGORITHM { return Ok(None); }
         let session = match self.store.megolm_inbound(chat_id, &encrypted.megolm_session_id).await {
@@ -168,12 +208,22 @@ impl LockNetMegolmHelper {
         match decrypt_inbound(&mut s, &encrypted.ciphertext) { Ok(pt) => Ok(Some(pt)), Err(_) => Ok(None) }
     }
 
+    /// Import an inbound session from a base64-encoded key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LockNetError::InvalidResponse`] if the key is malformed.
     pub async fn import(&self, chat_id: i64, megolm_session_id: String, session_key: String) -> Result<()> {
         let session = import_inbound(&session_key)?;
         self.store.megolm_inbound_put(chat_id, megolm_session_id, Arc::new(Mutex::new(session))).await;
         Ok(())
     }
 
+    /// Share the current `group_key` with a specific peer session via Olm.
+    ///
+    /// Loads (or creates) the outbound session, then sends an
+    /// `ln.encryption.group_key` payload with the key and the current
+    /// `encrypted_group_data` blob.
     pub async fn share_group_key(&self, chat_id: i64, to_user: i64, to_session: i64) -> Result<()> {
         let (info, _) = self.ensure_session(chat_id).await?;
         self.share_group_key_with_session_key(
@@ -186,6 +236,10 @@ impl LockNetMegolmHelper {
         .await
     }
 
+    /// Share a **specific** Megolm session (and its policy blob) via Olm.
+    ///
+    /// Used when the caller already has the info and does not want
+    /// [`Self::ensure_session`] to rotate the session under their feet.
     pub async fn share_group_key_with_session_key(
         &self,
         chat_id: i64,
@@ -208,6 +262,14 @@ impl LockNetMegolmHelper {
         self.olm.send(to_user, to_session, pt).wait().await
     }
 
+    /// Parse and apply an `ln.encryption.group_key` payload.
+    ///
+    /// - Imports the Megolm inbound session.
+    /// - Decrypts and caches the `group_data` policy blob (with anti-replay
+    ///   by version).
+    ///
+    /// Returns `Ok(true)` if the payload was a valid `group_key`,
+    /// `Ok(false)` for other message types.
     pub async fn decrypt_group_key(&self, plaintext: &str) -> Result<bool> {
         let val: serde_json::Value = match serde_json::from_str(plaintext) {
             Ok(v) => v,
@@ -241,7 +303,12 @@ impl LockNetMegolmHelper {
     }
 }
 
+// ---- shared helpers ----
 
+/// Build the `content` object of an `ln.encryption.group_key` payload.
+///
+/// Includes the Megolm session key and, if available, the current
+/// `group_data` blob plus its key.
 pub(crate) async fn build_group_key_content(
     store: &Arc<dyn CryptoStore>,
     chat_id: i64,
@@ -274,6 +341,9 @@ pub(crate) async fn build_group_key_content(
     content
 }
 
+/// Decrypt and persist a `group_data` blob from a `group_key` content object.
+///
+/// Rejects blobs with a version lower than the locally cached one.
 pub(crate) async fn apply_group_data_to_store(
     store: &Arc<dyn CryptoStore>,
     chat_id: i64,

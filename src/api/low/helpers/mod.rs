@@ -1,3 +1,20 @@
+//! Per-area WebSocket method wrappers.
+//!
+//! Each helper wraps one category of server methods as typed `async fn`s. All
+//! helpers are owned by [`crate::LockNetLowAgent`] and accessed via its
+//! accessor methods (`.messages()`, `.groups()`, …).
+//!
+//! - `messages` — send, get, edit, delete, reactions.
+//! - `groups` — create, join, leave, invites, policy sync.
+//! - `keys` — device keys and one-time keys.
+//! - `crypto` — cross-signing keys and `send_to_device`.
+//! - `events` — offline event sync.
+//! - `backup` — encrypted key backup (export / import).
+//! - `olm` — Olm 1-to-1 encrypted payloads.
+//! - `megolm` — Megolm group sessions and rotation.
+//! - `key_sharing` — `ln.encryption.key_request` flows.
+//! - `verification` — SAS and QR verification flows.
+
 pub mod backup;
 pub mod crypto;
 pub mod events;

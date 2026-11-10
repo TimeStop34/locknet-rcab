@@ -1,3 +1,10 @@
+//! Request dispatch to the WebSocket runner.
+//!
+//! Requests travel from API methods through an `mpsc` channel to the runner,
+//! which assigns an `id`, sends the JSON envelope, and resolves a
+//! [`oneshot`] reply when the matching response arrives (or the configured
+//! timeout expires).
+
 use std::time::Duration;
 
 use serde::de::DeserializeOwned;
@@ -6,8 +13,14 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::core::errors::LockNetError;
 
+/// Type-erased reply handler stored in the runner's `pending` map.
+///
+/// Implemented for `oneshot::Sender<Result<T>>` so the runner can resolve
+/// replies without knowing the concrete response type.
 pub(crate) trait ReplyHandler: Send {
+    /// Deliver a successful response payload.
     fn resolve_ok(self: Box<Self>, value: Value);
+    /// Deliver an error (transport, timeout, or server error).
     fn resolve_err(self: Box<Self>, err: LockNetError);
 }
 
@@ -23,11 +36,20 @@ impl<T: DeserializeOwned + Send + 'static> ReplyHandler for oneshot::Sender<crat
     }
 }
 
+/// Commands sent from API methods to the runner.
 pub(crate) enum Cmd {
+    /// Send a request and resolve `reply` with the server's response.
     Request { payload: Value, reply: Box<dyn ReplyHandler> },
+
+    /// Shut down the runner gracefully.
     Shutdown { reply: oneshot::Sender<()> },
 }
 
+/// Handle to the runner's command channel, carrying a per-request timeout.
+///
+/// All low-level helpers hold a `CmdSender` (not a raw `mpsc::Sender<Cmd>`)
+/// so that [`dispatch`] can apply
+/// [`crate::LockNetConfig::request_timeout`] automatically.
 #[derive(Clone)]
 pub(crate) struct CmdSender {
     tx: mpsc::Sender<Cmd>,
@@ -40,6 +62,18 @@ impl CmdSender {
     }
 }
 
+/// Send `payload` to the runner and await the reply.
+///
+/// The `id` field of `payload` is assigned by the runner, not by the caller.
+///
+/// # Errors
+///
+/// - [`LockNetError::RunnerDown`] if the runner channel is closed or the
+///   reply future is dropped without a value.
+/// - [`LockNetError::Timeout`] if no reply arrives within the configured
+///   `request_timeout`.
+/// - [`LockNetError::Server`] if the server returned an `error` envelope.
+/// - [`LockNetError::Json`] if the payload cannot be deserialized into `T`.
 pub(crate) async fn dispatch<T: DeserializeOwned + Send + 'static>(
     cmd_tx: &CmdSender,
     payload: Value,
@@ -59,6 +93,10 @@ pub(crate) async fn dispatch<T: DeserializeOwned + Send + 'static>(
     }
 }
 
+/// Like [`dispatch`], but discards the response payload.
+///
+/// Used by methods that only signal success (`delete_message`, `add_reaction`,
+/// `upload_cross_signing_keys`, …).
 pub(crate) async fn dispatch_unit(
     cmd_tx: &CmdSender,
     payload: Value,

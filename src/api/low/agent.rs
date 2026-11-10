@@ -1,3 +1,10 @@
+//! [`LockNetLowAgent`] — typed wrappers around individual WebSocket methods.
+//!
+//! Each helper (`.messages()`, `.groups()`, `.keys()`, …) exposes `async fn`s
+//! that dispatch a single request and await its reply. The agent itself is
+//! stateless apart from the shared command channel and the
+//! [`crate::core::crypto::CryptoStore`].
+
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use crate::api::low::command::CmdSender;
@@ -5,6 +12,13 @@ use crate::api::low::event::Event;
 use crate::api::low::helpers::*;
 use crate::core::crypto::CryptoStore;
 
+/// Low-level agent.
+///
+/// Owns one command channel to the WebSocket runner and exposes one helper
+/// per API area. Created by [`crate::LockNetClient::connection_request`];
+/// obtain it via [`crate::LockNetClient::get_low_agent`].
+///
+/// Most applications use [`crate::LockNetAgent`] instead.
 pub struct LockNetLowAgent {
     user_id: i64,
     session_id: i64,
@@ -72,19 +86,45 @@ impl LockNetLowAgent {
         }
     }
 
+    /// Server-side user ID of the authenticated user.
     pub fn user_id(&self) -> i64 { self.user_id }
+
+    /// Server-side session ID of the current device.
     pub fn session_id(&self) -> i64 { self.session_id }
+
+    /// Subscribe to server-pushed events.
     pub fn subscribe(&self) -> broadcast::Receiver<Event> { self.event_tx.subscribe() }
+
+    /// The underlying [`CryptoStore`].
     pub fn store(&self) -> Arc<dyn CryptoStore> { self.store.clone() }
 
+    /// Messages: send, get, edit, delete, reactions.
     pub fn messages(&self) -> Arc<LockNetMessagesHelper> { Arc::clone(&self.messages_helper) }
+
+    /// Groups and invitations.
     pub fn groups(&self) -> Arc<LockNetGroupsHelper> { Arc::clone(&self.groups_helper) }
+
+    /// Device keys and one-time keys.
     pub fn keys(&self) -> Arc<LockNetKeysHelper> { Arc::clone(&self.keys_helper) }
+
+    /// Cross-signing keys and signatures.
     pub fn crypto(&self) -> Arc<LockNetCryptoHelper> { Arc::clone(&self.crypto_helper) }
+
+    /// Event sync.
     pub fn events(&self) -> Arc<LockNetEventsHelper> { Arc::clone(&self.events_helper) }
+
+    /// Encrypted key backup (export / import).
     pub fn backup(&self) -> Arc<LockNetBackupHelper> { Arc::clone(&self.backup_helper) }
+
+    /// Olm (1-to-1) sessions.
     pub fn olm(&self) -> Arc<LockNetOlmHelper> { Arc::clone(&self.olm_helper) }
+
+    /// Megolm (group) sessions.
     pub fn megolm(&self) -> Arc<LockNetMegolmHelper> { Arc::clone(&self.megolm_helper) }
+
+    /// SAS / QR verification flows.
     pub fn verification(&self) -> Arc<LockNetVerificationHelper> { Arc::clone(&self.verification_helper) }
+
+    /// Key sharing (`ln.encryption.key_request`).
     pub fn key_sharing(&self) -> Arc<LockNetKeySharingHelper> { Arc::clone(&self.key_sharing_helper) }
 }
