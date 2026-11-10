@@ -1,3 +1,5 @@
+//! [`LockNetClient`] — the entry point of `locknet-rcab`.
+
 use std::sync::{Arc, OnceLock};
 
 use base64::Engine;
@@ -21,6 +23,39 @@ struct RunnerHandle {
     join: JoinHandle<()>,
 }
 
+/// LockNet client.
+///
+/// Owns a single WebSocket connection (the "runner" task) and the
+/// cryptographic state ([`CryptoStore`]). Wraps both a low-level API
+/// ([`LockNetLowAgent`]) for direct method calls and a high-level,
+/// object-oriented API ([`LockNetAgent`]) for chats and users.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use locknet_rcab::{Credentials, LockNetClient, LockNetConfig};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = LockNetConfig::new("https://locknet.example.com", "example.com")?;
+/// let mut client = LockNetClient::new(config);
+///
+/// let session = client
+///     .connection_request(Credentials::Login {
+///         username: "alice".into(),
+///         password: "secret".into(),
+///     })
+///     .await?;
+///
+/// println!("logged in as {} (session {})", session.user_id, session.session_id);
+///
+/// let agent = client.get_agent().expect("agent");
+/// // ... use `agent` ...
+///
+/// client.disconnect().await?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct LockNetClient {
     config: LockNetConfig,
     http: reqwest::Client,
@@ -33,16 +68,35 @@ pub struct LockNetClient {
 }
 
 impl LockNetClient {
+    /// Create a client with an [`InMemoryStore`].
+    ///
+    /// For persistence across process restarts use
+    /// [`LockNetClient::with_store`] with a [`crate::core::crypto::SqliteStore`].
     pub fn new(config: LockNetConfig) -> Self {
         Self::with_store(config, Arc::new(InMemoryStore::new()))
     }
 
+    /// Create a client with a custom [`CryptoStore`].
+    ///
+    /// # Examples
+    ///
+    /// ```rust,no_run
+    /// use std::sync::Arc;
+    /// use locknet_rcab::{LockNetClient, LockNetConfig, SqliteStore};
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let config = LockNetConfig::new("https://locknet.example.com", "example.com")?;
+    /// let store = Arc::new(SqliteStore::open("./locknet.db", "passphrase")?);
+    /// let client = LockNetClient::with_store(config, store);
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn with_store(config: LockNetConfig, store: Arc<dyn CryptoStore>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         let http = reqwest::Client::builder()
             .timeout(config.http_timeout)
             .user_agent(config.user_agent.clone())
-            .danger_accept_invalid_certs(true)
+            .danger_accept_invalid_certs(config.accept_invalid_certs)
             .build()
             .expect("reqwest client");
 
@@ -58,14 +112,24 @@ impl LockNetClient {
         }
     }
 
+    /// The config this client was created with.
     pub fn config(&self) -> &LockNetConfig { &self.config }
 
+    /// Current session context, or `None` if [`Self::connection_request`]
+    /// has not been called.
     pub fn session(&self) -> Option<LockNetSessionContext> {
         self.session.try_lock().ok().and_then(|g| g.clone())
     }
 
+    /// Low-level agent, or `None` if not connected.
+    ///
+    /// Use this for direct method calls without the high-level object model.
     pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> { self.low_agent.clone() }
 
+    /// High-level agent, or `None` if not connected.
+    ///
+    /// The agent is created **lazily** on the first call: if you only use the
+    /// low-level API, no event-processing task is spawned.
     pub fn get_agent(&self) -> Option<Arc<LockNetAgent>> {
         let low = self.low_agent.as_ref()?;
         let agent = self
@@ -74,8 +138,25 @@ impl LockNetClient {
         Some(agent.clone())
     }
 
+    /// The underlying [`CryptoStore`].
     pub fn store(&self) -> Arc<dyn CryptoStore> { self.store.clone() }
 
+    /// Establish a session with the server.
+    ///
+    /// Performs the HTTP auth handshake, spawns the WebSocket runner, and
+    /// (for [`Credentials::Login`] / [`Credentials::Register`]) uploads the
+    /// device identity keys plus 50 one-time keys on first use.
+    ///
+    /// If a session is already active, it is disconnected first.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidCredentials`] for wrong username/password.
+    /// - [`LockNetError::Server`] with code `username_taken` for duplicate
+    ///   registration.
+    /// - [`LockNetError::SessionExpired`] for an invalid refresh token.
+    /// - [`LockNetError::RunnerDown`] / [`LockNetError::Ws`] / [`LockNetError::Http`]
+    ///   on transport failures.
     pub async fn connection_request(&mut self, creds: Credentials) -> Result<LockNetSessionContext> {
         if self.runner.is_some() {
             self.disconnect().await?;
@@ -191,6 +272,16 @@ impl LockNetClient {
         Ok(ctx)
     }
 
+    /// Disconnect from the server.
+    ///
+    /// Aborts the high-level agent (if created), sends a shutdown signal to
+    /// the runner, and waits up to 5 seconds for the connection to close
+    /// cleanly. Safe to call when not connected.
+    ///
+    /// # Errors
+    ///
+    /// Currently never fails; the signature is `Result` for future
+    /// compatibility.
     pub async fn disconnect(&mut self) -> Result<()> {
         if let Some(high) = self.high_agent.take() {
             high.shutdown().await;

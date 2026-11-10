@@ -7,7 +7,7 @@
 //! - [`errors`] — the shared error type.
 //! - [`flow`] — background task handles.
 //! - [`policies`] — E2EE group policies (history visibility, rotation).
-//! - [`runner`] — WebSocket connection loop (private).
+//! - `runner` — WebSocket connection loop (crate-private).
 //! - [`transport`] — HTTP and WebSocket transports.
 //! - [`crypto`] — Olm, Megolm, cross-signing, and persistent stores.
 

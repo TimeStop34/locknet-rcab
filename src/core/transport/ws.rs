@@ -1,6 +1,6 @@
 //! WebSocket transport with configurable TLS.
 //!
-//! One connection is opened by [`crate::core::runner::spawn`] and used for
+//! One connection is opened by `crate::core::runner::spawn` and used for
 //! the entire lifetime of a [`crate::LockNetClient`]. TLS verification uses
 //! the system trust store (OpenSSL / Secure Transport / SChannel) unless
 //! [`crate::LockNetConfig::accept_invalid_certs`] is enabled.
