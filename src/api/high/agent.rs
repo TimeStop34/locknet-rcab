@@ -1,3 +1,33 @@
+//! [`LockNetAgent`] — the stateful high-level agent.
+//!
+//! This is the main entry point for applications that want an
+//! object-oriented API on top of [`crate::api::low`]. The agent:
+//!
+//! - Maintains an internal cache of chats, users, invites, and messages.
+//! - Spawns a background task (`start_process`) that turns
+//!   raw [`crate::api::low::Event`]s into [`HighEvent`]s, decrypts
+//!   `to_device` payloads, and drives multi-step E2EE flows (group key
+//!   fan-out, key requests, policy sync).
+//! - Exposes object-oriented handles: [`Chat`] for group operations,
+//!   [`crate::SecurityHelper`] for trust and verification.
+//!
+//! ## Architectural invariant
+//!
+//! The agent is the **sole Olm decryptor** in high-level mode. Low-level
+//! helpers that decrypt `to_device` payloads (such as
+//! [`crate::api::low::helpers::LockNetKeySharingHelper::request`]) must
+//! **not** be used concurrently with an active agent on the same client —
+//! they would race on the stateful Olm session and silently drop payloads.
+//! The verification flows in [`crate::api::high::verification`] obey this:
+//! they consume [`HighEvent::SasMessage`] / [`HighEvent::QrMessage`] rather
+//! than raw `to_device` events.
+//!
+//! ## Getting an agent
+//!
+//! Agents are created lazily: [`crate::LockNetClient::get_agent`] creates the
+//! agent on first call and returns the cached `Arc` thereafter. Applications
+//! that only use the low-level API never pay for the agent's background task.
+
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 use tokio::task::JoinHandle;
@@ -10,6 +40,38 @@ use super::models::{Chat, Group, Invite, Message, Reaction, User};
 use super::security::SecurityHelper;
 use super::state::{ClientState, PendingSasStart};
 
+/// Stateful, object-oriented LockNet agent.
+///
+/// Wraps a [`LockNetLowAgent`] with a cache, event processing, and E2EE
+/// flow orchestration. Obtained via [`crate::LockNetClient::get_agent`].
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use locknet_rcab::{Credentials, LockNetClient, LockNetConfig};
+///
+/// # #[tokio::main]
+/// # async fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let config = LockNetConfig::new("https://locknet.example.com", "example.com")?;
+/// let mut client = LockNetClient::new(config);
+/// client
+///     .connection_request(Credentials::Login {
+///         username: "alice".into(),
+///         password: "secret".into(),
+///     })
+///     .await?;
+///
+/// let agent = client.get_agent().expect("agent");
+/// let chat = agent.chat(42).await?;
+/// chat.send("hello").await?;
+///
+/// let mut events = agent.subscribe();
+/// while let Ok(evt) = events.recv().await {
+///     println!("event: {evt:?}");
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub struct LockNetAgent {
     pub(crate) low: Arc<LockNetLowAgent>,
     pub(crate) state: Arc<RwLock<ClientState>>,
@@ -19,6 +81,10 @@ pub struct LockNetAgent {
 }
 
 impl LockNetAgent {
+    /// Create a new agent for the given low-level agent.
+    ///
+    /// Spawns the background event-processing task. Called by
+    /// [`crate::LockNetClient::get_agent`]; not part of the public API.
     pub(crate) fn new(low: Arc<LockNetLowAgent>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
         let state = Arc::new(RwLock::new(ClientState::new(low.user_id(), low.session_id())));
@@ -34,6 +100,12 @@ impl LockNetAgent {
         agent
     }
 
+    /// Spawn the background task that consumes low-level events.
+    ///
+    /// The task runs until the low-level subscription channel closes (i.e.
+    /// the underlying runner shuts down) or until [`Self::shutdown`] is
+    /// called. Every event is passed through `process_event`, which updates
+    /// the internal cache and emits [`HighEvent`]s.
     fn start_process(&mut self) {
         let low = self.low.clone();
         let state = self.state.clone();
@@ -50,20 +122,41 @@ impl LockNetAgent {
         self.process_handle = Some(handle);
     }
 
+    /// Abort the background event-processing task.
+    ///
+    /// Called by [`crate::LockNetClient::disconnect`] before the low-level
+    /// runner shuts down.
     pub(crate) async fn shutdown(&self) {
         if let Some(h) = self.process_handle.as_ref() {
             h.abort();
         }
     }
 
+    // ---- identity ----
+
+    /// Server-side user ID of the authenticated user.
     pub fn user_id(&self) -> i64 { self.low.user_id() }
+
+    /// Server-side session ID of the current device.
     pub fn session_id(&self) -> i64 { self.low.session_id() }
 
+    /// Resolve the current user from the local cache, inserting a placeholder
+    /// if not yet cached.
     pub async fn user(&self) -> User {
         let mut st = self.state.write().await;
         st.resolve_user(self.low.user_id())
     }
 
+    // ---- chats ----
+
+    /// List all chats the current user is a member of.
+    ///
+    /// Returns the cached list if non-empty; otherwise triggers
+    /// [`Self::refresh_chats`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates the error from [`Self::refresh_chats`] on a cache miss.
     pub async fn chats(&self) -> Result<Vec<Chat>> {
         let cached = self.cached_chats();
         if !cached.is_empty() {
@@ -72,6 +165,10 @@ impl LockNetAgent {
         self.refresh_chats().await
     }
 
+    /// Snapshot of the cached chats without any network round-trip.
+    ///
+    /// Returns an empty `Vec` if the cache is currently locked by another
+    /// task (the function uses `try_read`).
     pub fn cached_chats(&self) -> Vec<Chat> {
         let st = match self.state.try_read() {
             Ok(g) => g,
@@ -83,6 +180,16 @@ impl LockNetAgent {
             .collect()
     }
 
+    /// Re-fetch the group list from the server, update the cache, and return
+    /// the updated chats.
+    ///
+    /// For each group, the local `encrypted_group_data` blob is compared to
+    /// the server's; if the server blob is newer, it is decrypted, the policy
+    /// is updated, and the local cache is replaced.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport errors from [`crate::api::low::helpers::LockNetGroupsHelper::list`].
     pub async fn refresh_chats(&self) -> Result<Vec<Chat>> {
         let groups = self.low.groups().list().await?;
         let mut out = Vec::with_capacity(groups.len());
@@ -98,6 +205,16 @@ impl LockNetAgent {
         Ok(out)
     }
 
+    /// Get a chat handle by ID.
+    ///
+    /// Returns the cached handle if the group is already known; otherwise
+    /// fetches metadata from the server (which also decrypts the policy blob
+    /// if the `group_data_key` is available).
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `group_not_found` if the group
+    ///   does not exist, or is private and the caller is not a member.
     pub async fn chat(&self, chat_id: i64) -> Result<Chat> {
         if let Some(c) = self.cached_chat(chat_id) {
             return Ok(c);
@@ -119,6 +236,18 @@ impl LockNetAgent {
             .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
+    // ---- group management ----
+
+    /// Open a direct (1-to-1) chat with `other_user_id`.
+    ///
+    /// The other user receives a [`HighEvent::InviteReceived`] event and must
+    /// accept it via [`Self::accept_invite`] before being added as a member.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `self_direct` if
+    ///   `other_user_id` equals the current user.
+    /// - [`LockNetError::Server`] with code `user_not_found`.
     pub async fn open_direct(&self, other_user_id: i64) -> Result<Chat> {
         let group = self.low.groups().create_direct(other_user_id).await?;
         let g = {
@@ -130,6 +259,22 @@ impl LockNetAgent {
         Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
+    /// Create a group.
+    ///
+    /// `participants` receive [`HighEvent::InviteReceived`] events, not
+    /// membership; they must accept via [`Self::accept_invite`]. The caller
+    /// is the only member until invites are accepted.
+    ///
+    /// The group's initial policies are set from
+    /// [`crate::LockNetConfig::default_history_visibility`] and
+    /// [`crate::LockNetConfig::default_megolm_rotation_visibility`]. The
+    /// policy blob is uploaded to the server on the first send.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `duplicate_participants`,
+    ///   `creator_in_participants`, `public_id_required`,
+    ///   `public_id_taken`, or `users_not_found`.
     pub async fn create_group(
         &self,
         name: impl Into<String>,
@@ -151,6 +296,13 @@ impl LockNetAgent {
         Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
+    /// Join a public group by its `public_id`.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `group_not_public` if the group
+    ///   does not exist or is private.
+    /// - [`LockNetError::Server`] with code `already_member`.
     pub async fn join_group(&self, public_id: impl Into<String>) -> Result<Chat> {
         let group = self.low.groups().join(public_id).await?;
         let g = {
@@ -162,6 +314,14 @@ impl LockNetAgent {
         Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
     }
 
+    /// Leave a group.
+    ///
+    /// If the caller is the creator, the group is deleted and every member
+    /// loses access.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `not_member` or `group_not_found`.
     pub async fn leave_chat(&self, chat_id: i64) -> Result<()> {
         self.low.groups().leave(chat_id).await?;
         let mut st = self.state.write().await;
@@ -169,6 +329,17 @@ impl LockNetAgent {
         Ok(())
     }
 
+    // ---- invitations ----
+
+    /// List pending invitations for the current user.
+    ///
+    /// Results are merged into the cache; the returned invites are the same
+    /// objects that appear in [`HighEvent::InviteReceived`].
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport errors from
+    /// [`crate::api::low::helpers::LockNetGroupsHelper::invites`].
     pub async fn invites(&self) -> Result<Vec<Invite>> {
         let invites = self.low.groups().invites().await?;
         let mut st = self.state.write().await;
@@ -181,6 +352,18 @@ impl LockNetAgent {
         Ok(out)
     }
 
+    /// Accept an invitation, becoming a member of the group.
+    ///
+    /// After acceptance the invite is removed from the cache and the group is
+    /// re-fetched from the server (picking up the current member list and
+    /// policy).
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if `invite_id` is not in the local
+    ///   cache after a refresh.
+    /// - [`LockNetError::Server`] with code `invite_not_found` or
+    ///   `already_member`.
     pub async fn accept_invite(&self, invite_id: i64) -> Result<Chat> {
         let group_id = {
             let st = self.state.read().await;
@@ -205,6 +388,11 @@ impl LockNetAgent {
         self.chat(group_id).await
     }
 
+    /// Decline an invitation.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::Server`] with code `invite_not_found`.
     pub async fn decline_invite(&self, invite_id: i64) -> Result<()> {
         self.low.groups().decline_invite(invite_id).await?;
         let mut st = self.state.write().await;
@@ -212,26 +400,63 @@ impl LockNetAgent {
         Ok(())
     }
 
+    // ---- users ----
+
+    /// Resolve a user from the local cache, or return a placeholder
+    /// [`User::unknown`] if not cached.
+    ///
+    /// User metadata is currently populated only by group membership data;
+    /// there is no standalone user-info endpoint on the server yet.
     pub async fn user_info(&self, user_id: i64) -> Result<User> {
         let mut st = self.state.write().await;
         Ok(st.resolve_user(user_id))
     }
 
+    /// Cached user, if present. Returns `None` if the cache is locked or the
+    /// user is not cached.
     pub fn cached_user(&self, user_id: i64) -> Option<User> {
         let st = self.state.try_read().ok()?;
         st.users.get(&user_id).cloned()
     }
 
+    /// Cached message, if present. Returns `None` if the message has not been
+    /// observed yet in the current session.
     pub fn cached_message(&self, message_id: i64) -> Option<Message> {
         let st = self.state.try_read().ok()?;
         st.messages.get(&message_id).cloned()
     }
 
+    // ---- events / services ----
+
+    /// Subscribe to high-level events.
+    ///
+    /// Returns a broadcast receiver for [`HighEvent`]s. Events are dropped for
+    /// slow subscribers once the internal buffer (1024) is full — callers
+    /// should drain the channel promptly or handle
+    /// [`tokio::sync::broadcast::error::RecvError::Lagged`].
     pub fn subscribe(&self) -> broadcast::Receiver<HighEvent> { self.event_tx.subscribe() }
+
+    /// The trust/verification helper.
+    ///
+    /// See [`SecurityHelper`] for cross-signing setup, SAS / QR flows, and
+    /// key backup.
     pub fn security(&self) -> Arc<SecurityHelper> { self.security.clone() }
+
+    /// Escape hatch to the low-level agent.
+    ///
+    /// Use only for operations that are not covered by the high-level API, or
+    /// for advanced scenarios where explicit control over each request is
+    /// required. **Do not** call low-level decryptors (`olm.decrypt`,
+    /// `key_sharing.request`, SAS/QR flows from `api::low`) while the agent is
+    /// active — they would race for the stateful Olm session.
     pub fn low(&self) -> Arc<LockNetLowAgent> { self.low.clone() }
 }
 
+/// Build a minimal [`Group`] placeholder for a chat that is not yet cached.
+///
+/// Used when a `message_create` / `message_update` arrives before
+/// [`LockNetAgent::refresh_chats`] has run. The placeholder has empty members
+/// and no policy — it is enough to construct a [`Chat`] handle for the event.
 fn stub_group(chat_id: i64) -> Group {
     Group {
         id: chat_id,
@@ -248,6 +473,14 @@ fn stub_group(chat_id: i64) -> Group {
     }
 }
 
+/// Decrypt the text of an [`crate::api::low::models::Encrypted`] payload.
+///
+/// Handles both `ln.plaintext.v1` (public groups: base64-encoded UTF-8) and
+/// `ln.encryption.megolm.v1` (via [`crate::api::low::helpers::LockNetMegolmHelper::decrypt`]).
+///
+/// Returns `None` on any failure (unknown algorithm, missing Megolm key,
+/// malformed base64, invalid UTF-8). Callers treat `None` as "pending
+/// decryption" and record the message ID for later retry.
 async fn decrypt_text(
     low: &LockNetLowAgent,
     chat_id: i64,
@@ -264,6 +497,16 @@ async fn decrypt_text(
     }
 }
 
+/// Resolve a sender's session ID to a user ID by scanning the member lists of
+/// `chat_ids`.
+///
+/// Used by [`respond_key_request`] when the `ln.encryption.key_request`
+/// payload does not carry the sender's user ID. The server rewrites
+/// `sender_session_id` from the authenticated session, so it is trustworthy —
+/// we only need to find which user it belongs to.
+///
+/// Returns `None` if `chat_ids` is empty, no member has that session, or any
+/// network request fails.
 async fn resolve_user_by_session(
     low: &Arc<LockNetLowAgent>,
     chat_ids: &[i64],
@@ -294,6 +537,23 @@ async fn resolve_user_by_session(
     None
 }
 
+/// Respond to an incoming `ln.encryption.key_request`.
+///
+/// Applies the [`HistoryVisibility`] policy of every requested chat:
+///
+/// - [`HistoryVisibility::AfterJoin`] — reject the entire request with
+///   `history_visibility_policy`.
+/// - [`HistoryVisibility::AllVerifiedSessions`] — grant only if the requester
+///   passes [`SecurityHelper::is_session_verified`].
+/// - [`HistoryVisibility::AllVerifiedUsers`] — grant only if the requester
+///   passes both [`SecurityHelper::is_session_verified`] and
+///   [`SecurityHelper::is_user_verified`] (Web of Trust).
+///
+/// Sessions for which the policy denies access are filtered out of the reply;
+/// if **all** requested chats are denied, a single `key_denied` is sent.
+///
+/// Runs in a detached task (spawned by [`process_event`]) so that a slow
+/// responder does not block the event loop.
 async fn respond_key_request(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
@@ -412,6 +672,18 @@ async fn respond_key_request(
     }
 }
 
+/// Retry decryption for messages currently in `pending_decrypt[chat_id]`.
+///
+/// Called after a `group_key` is imported (via [`process_event`]). For every
+/// pending message, tries [`crate::api::low::helpers::LockNetMegolmHelper::decrypt`]
+/// with the now-available inbound session. Successful decryptions:
+///
+/// - update [`Message::text`] in the cache,
+/// - remove the message from `pending_decrypt`,
+/// - emit [`HighEvent::MessageDecrypted`] for each.
+///
+/// Failures are ignored — the message stays in `pending_decrypt` for the next
+/// attempt (e.g. another `group_key` may arrive later).
 async fn try_decrypt_pending(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
@@ -467,6 +739,43 @@ async fn try_decrypt_pending(
     }
 }
 
+/// Process a single low-level event.
+///
+/// Updates the internal cache and emits [`HighEvent`]s. This is the heart of the
+/// agent's event-driven behavior. Variants:
+///
+/// - **`MessageCreate` / `MessageUpdate` / `MessageDelete`** — decrypt text
+///   (or mark deleted), cache, emit [`HighEvent::NewMessage`] /
+///   [`HighEvent::MessageUpdated`] / [`HighEvent::MessageDeleted`].
+/// - **`ReactionAdd` / `ReactionRemove`** — update aggregation in
+///   `state.messages`, emit [`HighEvent::ReactionAdded`] /
+///   [`HighEvent::ReactionRemoved`].
+/// - **`GroupCreated` / `GroupInviteCreated`** — cache the group/invite,
+///   emit [`HighEvent::GroupCreated`] / [`HighEvent::InviteReceived`].
+/// - **`GroupMembershipChanged`** — if the local policy is known, rotate the
+///   Megolm outbound session and fan out the new key to remaining eligible
+///   members; if the caller is the creator, push the updated policy blob to
+///   the server. Emits [`HighEvent::GroupMembershipChanged`].
+/// - **`GroupDataUpdated`** — re-fetch the group, decrypt the new policy,
+///   emit [`HighEvent::PolicyChanged`].
+/// - **`ToDevice`** — decrypt with Olm, then dispatch by payload type:
+///   `group_key` → import inbound session, decrypt policy blob, emit
+///   [`HighEvent::KeyImported`] (and [`HighEvent::KeyRequestImported`] if the
+///   payload carries a `transaction_id`), retry pending decryptions;
+///   `key_request` → emit [`HighEvent::KeyRequestReceived`] and spawn
+///   [`respond_key_request`]; `key_request_done` / `key_denied` → emit the
+///   corresponding `HighEvent::KeyRequest*`; verification messages → emit
+///   [`HighEvent::SasMessage`] / [`HighEvent::QrMessage`]; SAS `start` is
+///   additionally recorded in `state.pending_sas_starts`.
+/// - **`CrossSigningReset` / `CrossSigningSignatureAdded`** — invalidate the
+///   Web-of-Trust cache; on reset also drop the user from `verified_users`
+///   and emit [`HighEvent::CrossSigningReset`].
+/// - **`Reconnected` / `SessionExpired`** — forwarded as
+///   [`HighEvent::Reconnected`] / [`HighEvent::SessionExpired`].
+/// - **`Unknown`** — ignored.
+///
+/// The agent is the sole Olm decryptor for `to_device` — this is what
+/// prevents races on the stateful Olm session.
 async fn process_event(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
