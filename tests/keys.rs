@@ -89,7 +89,6 @@ async fn sign_msk(
     Ok(())
 }
 
-// ---- tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn self_is_always_verified() {

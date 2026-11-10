@@ -1,3 +1,15 @@
+//! Cryptographic primitives used by `locknet-rcab`.
+//!
+//! This module re-exports the low-level crypto building blocks. Higher layers
+//! ([`crate::api::low`], [`crate::api::high`]) consume them, but you normally
+//! do not call these directly from application code — use
+//! [`crate::LockNetAgent`] or [`crate::LockNetLowAgent`] instead.
+//!
+//! - [`Account`] — Olm identity keys and one-time keys.
+//! - [`CryptoStore`] / [`InMemoryStore`] / [`SqliteStore`] — persistent state.
+//! - [`CrossSigningKeysPrivate`] — MSK/SSK/USK for the Web of Trust.
+//! - [`group_data`] — encryption of the group policy blob.
+
 pub mod account;
 pub mod group_data;
 pub mod megolm;

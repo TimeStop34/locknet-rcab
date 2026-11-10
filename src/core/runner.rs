@@ -1,3 +1,14 @@
+//! WebSocket runner: a single connection loop with automatic reconnect.
+//!
+//! One [`crate::LockNetClient`] spawns exactly one runner. The runner:
+//!
+//! 1. Opens the WebSocket and performs the initial `auth` handshake.
+//! 2. Dispatches server replies to pending requests by `id`.
+//! 3. Forwards all unrecognized pushes to the `event_tx` broadcast channel.
+//! 4. Keeps the connection alive with periodic ping frames.
+//! 5. On disconnect, refreshes the access token and reconnects with
+//!    exponential backoff until success or session expiry.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -14,9 +25,23 @@ use crate::core::config::LockNetConfig;
 use crate::core::errors::{LockNetError, Result};
 use crate::core::transport::{http, ws};
 
+/// Map of in-flight request IDs to their reply handlers.
 pub(crate) type Pending = Arc<Mutex<HashMap<String, Box<dyn ReplyHandler>>>>;
+
+/// Shared session context (access token, refresh token, expiry).
 pub(crate) type Session = Arc<Mutex<Option<LockNetSessionContext>>>;
 
+/// Spawn the WebSocket runner task.
+///
+/// The returned [`JoinHandle`] resolves when the runner stops, either because
+/// a [`Cmd::Shutdown`] was sent through the command channel or because the
+/// session expired and could not be refreshed.
+///
+/// If `auth_ok_tx` is `Some`, the runner uses it to signal the outcome of the
+/// **initial** `auth` handshake back to the caller (`Ok(session_id)` or
+/// `Err(e)`). Subsequent reconnects do not use this channel; reconnect
+/// failures are surfaced via [`Event::Reconnected`] / [`Event::SessionExpired`]
+/// on `event_tx`.
 pub(crate) fn spawn(
     config: LockNetConfig,
     http: reqwest::Client,
@@ -217,6 +242,10 @@ async fn drain_pending(pending: &Pending) {
     }
 }
 
+/// Compute the next reconnect delay: `current * 2`, capped at `max`.
+///
+/// Exposed as `pub(crate)` so the doubling and capping behavior can be
+/// unit-tested without actually sleeping or triggering network errors.
 pub(crate) fn next_backoff(current: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
     (current * 2).min(max)
 }

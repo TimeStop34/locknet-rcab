@@ -23,7 +23,6 @@ async fn create_group_only_creator_is_member() {
     assert_eq!(members.len(), 1);
     assert_eq!(members[0].user_id, alice.session.user_id);
 
-    // Invite виден у Bob
     let invites = bob_low.groups().invites().await.expect("invites");
     let inv = invites
         .iter()
@@ -117,11 +116,9 @@ async fn decline_invite_works() {
 
     bob_low.groups().decline_invite(inv.id).await.expect("decline");
 
-    // После decline invite недоступен
     let err = bob_low.groups().accept_invite(inv.id).await.unwrap_err();
     common::assert_server_code(err, "invite_not_found");
 
-    // Bob по-прежнему не участник → group_not_found (private)
     let err = bob_low.groups().info(group.id).await.unwrap_err();
     common::assert_server_code(err, "group_not_found");
 
@@ -178,7 +175,6 @@ async fn creator_leave_deletes_group() {
     let err = alice_low.groups().info(group.id).await.unwrap_err();
     common::assert_server_code(err, "group_not_found");
 
-    // Приглашение теперь невалидно — группа удалена
     let err = bob_low.groups().accept_invite(inv.id).await.unwrap_err();
     common::assert_server_code(err, "invite_not_found");
 
@@ -207,7 +203,6 @@ async fn create_direct_creates_private_group() {
     assert_eq!(direct.member_count, 1, "only creator until accept");
     assert_eq!(direct.created_by, alice.session.user_id);
 
-    // После accept — 2 участника
     let invites = bob_low.groups().invites().await.expect("invites");
     let inv = invites.iter().find(|i| i.group_id == direct.id).unwrap().clone();
     bob_low.groups().accept_invite(inv.id).await.expect("accept direct");
@@ -239,20 +234,16 @@ async fn public_group_join_and_already_member() {
     assert!(group.is_public);
     assert_eq!(group.public_id.as_deref(), Some(public_id.as_str()));
 
-    // Не-участник видит public-группу, но members=None
     let seen = bob_low.groups().info(group.id).await.expect("info by non-member");
     assert!(seen.members.is_none(), "non-member must not see member list");
     assert_eq!(seen.member_count, 1);
 
-    // Join
     let joined = bob_low.groups().join(public_id.clone()).await.expect("join");
     assert_eq!(joined.id, group.id);
 
-    // Повторный join → already_member
     let err = bob_low.groups().join(public_id.clone()).await.unwrap_err();
     common::assert_server_code(err, "already_member");
 
-    // Теперь member видит members
     let seen2 = bob_low.groups().info(group.id).await.expect("info member");
     assert!(seen2.members.is_some());
     assert_eq!(seen2.member_count, 2);

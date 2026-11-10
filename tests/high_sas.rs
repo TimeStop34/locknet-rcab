@@ -50,7 +50,6 @@ async fn sas_via_high_full_flow() {
 
     let _group_id = common::setup_group_with_two(&alice, &bob, "HSAS").await;
 
-    // Bob подписан ДО sas_start
     let mut bob_high_rx = bob_agent.subscribe();
 
     let alice_txid = alice_agent

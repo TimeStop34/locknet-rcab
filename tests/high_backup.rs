@@ -35,7 +35,6 @@ async fn high_backup_export_import_roundtrip() {
     let alice_sec = alice_agent.security();
     let group_id = common::setup_group_with_two(&alice, &bob, "HBk").await;
 
-    // Alice шлёт сообщение (fan-out на Bob)
     let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
     let mut bob_rx = bob_agent.subscribe();
     let sent = alice_chat.send("backup payload").await.expect("send");
@@ -49,7 +48,6 @@ async fn high_backup_export_import_roundtrip() {
     assert!(export.version >= 1);
     assert!(export.items_uploaded >= 1, "должно быть >=1 megolm-сессий");
 
-    // Alice2 — новое устройство того же пользователя, нет ключей
     let mut alice2_client = LockNetClient::new(common::test_config());
     let alice2_session = alice2_client
         .connection_request(Credentials::Login {

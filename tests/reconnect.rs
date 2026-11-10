@@ -17,7 +17,6 @@ async fn manual_reconnect_preserves_session_and_works() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "RC").await;
 
-    // Alice шлёт сообщение ДО disconnect
     let alice_low = alice.low();
     let ack1 = alice_low
         .messages()
@@ -29,11 +28,9 @@ async fn manual_reconnect_preserves_session_and_works() {
         .expect("send before");
     assert!(ack1.message_id > 0);
 
-    // Alice disconnect
     let mut alice = alice;
     alice.client.disconnect().await.expect("disconnect");
 
-    // Alice reconnect через Session credentials
     let mut alice2 = LockNetClient::new(common::test_config());
     let s2 = alice2
         .connection_request(Credentials::Session {
@@ -47,7 +44,6 @@ async fn manual_reconnect_preserves_session_and_works() {
     assert!(alice2.get_low_agent().is_some(), "runner started");
     assert!(alice2.get_agent().is_some(), "agent available");
 
-    // Отправляем новое сообщение — работает
     let alice2_low = alice2.get_low_agent().expect("low");
     let ack2 = alice2_low
         .messages()
@@ -59,7 +55,6 @@ async fn manual_reconnect_preserves_session_and_works() {
         .expect("send after");
     assert!(ack2.message_id > ack1.message_id);
 
-    // Bob видит оба сообщения в истории
     let bob_agent = bob.client.get_agent().expect("bob agent");
     let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
     let history = bob_chat.messages(None, 20).await.expect("bob history");
@@ -87,9 +82,6 @@ async fn reconnect_with_invalid_refresh_jwt_fails() {
         .await
         .unwrap_err();
 
-    // HTTP 401 от сервера → http::refresh мапит в SessionExpired.
-    // Но сначала может упасть на decode (если сервер вернул 200 с битым токеном).
-    // Ожидаем любой из вариантов, не панику.
     assert!(
         matches!(
             err,
@@ -103,8 +95,6 @@ async fn reconnect_with_invalid_refresh_jwt_fails() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_drains_offline_events() {
-    // Bob offline → Alice шлёт 2 сообщения → Bob reconnects через Session →
-    // event_sync находит накопленные message_create.
     let alice = common::register_new("rc_drain_a").await;
     let bob = common::register_new("rc_drain_b").await;
 
@@ -116,12 +106,10 @@ async fn reconnect_drains_offline_events() {
 
     let alice_low = alice.low();
 
-    // Bob offline
     let mut bob = bob;
     bob.client.disconnect().await.ok();
     tokio::time::sleep(Duration::from_millis(250)).await;
 
-    // Alice шлёт 2 сообщения
     let mut msg_ids = Vec::new();
     for i in 0..2 {
         let ack = alice_low
@@ -135,7 +123,6 @@ async fn reconnect_drains_offline_events() {
         msg_ids.push(ack.message_id);
     }
 
-    // Bob reconnects
     let mut bob2 = LockNetClient::new(common::test_config());
     let s2 = bob2
         .connection_request(Credentials::Session {
@@ -152,7 +139,6 @@ async fn reconnect_drains_offline_events() {
     let ack = bob2_low.events().sync().await.expect("sync");
     assert!(ack.sent >= 2, "expected >=2 events, got {}", ack.sent);
 
-    // Проверяем, что subscriber получил message_create для наших id
     let mut received = Vec::new();
     for _ in 0..60 {
         match tokio::time::timeout(Duration::from_millis(80), bob2_rx.recv()).await {
@@ -177,12 +163,9 @@ async fn reconnect_drains_offline_events() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_idempotent_when_already_connected() {
-    // connection_request на активном client сначала вызывает disconnect() —
-    // новый runner стартует, старый гасится. Никаких утечек/паник.
     let mut alice = common::register_new("rc_idem").await;
     let rjwt = alice.session.rjwt.clone();
 
-    // Reconnect через тот же client
     let s2 = alice
         .client
         .connection_request(Credentials::Session { refresh_jwt: rjwt })

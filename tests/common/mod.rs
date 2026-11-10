@@ -21,8 +21,6 @@ pub fn space() -> String {
 pub fn test_config() -> LockNetConfig {
     let mut cfg = LockNetConfig::new(&base_url(), &space()).expect("config");
     cfg.sync_on_connect = false;
-    // Мягкие дефолты для тестов (не проверяют политику).
-    // Прод-дефолты — AllVerifiedUsers + OnlyVerifiedUsers.
     cfg.default_history_visibility = locknet_rcab::HistoryVisibility::AllVerifiedSessions;
     cfg.default_megolm_rotation_visibility = locknet_rcab::MegolmRotationVisibility::AllMembers;
     cfg

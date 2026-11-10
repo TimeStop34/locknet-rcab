@@ -1,3 +1,9 @@
+//! SQLCipher-backed [`CryptoStore`] implementation.
+//!
+//! Stores Olm account, Olm sessions, Megolm sessions, cross-signing keys,
+//! group policy blobs, and rotation metadata in a single encrypted SQLite
+//! database. Schema is versioned via `PRAGMA user_version`.
+
 use std::path::Path;
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -19,12 +25,37 @@ use crate::core::policies::{GroupData, GroupDataState, MegolmOutboundMeta};
 
 const SCHEMA_VERSION: i64 = 2;
 
+/// Persistent [`CryptoStore`] backed by SQLCipher.
+///
+/// The database file is encrypted with the `passphrase` supplied at open
+/// time. The passphrase is **not** stored by this type; obtaining and
+/// protecting it (Keychain, KWallet, Credential Manager, TPM, prompt, etc.)
+/// is the caller's responsibility.
+///
+/// # Examples
+///
+/// ```rust,no_run
+/// use locknet_rcab::SqliteStore;
+///
+/// let store = SqliteStore::open("./locknet.db", "my-secret-passphrase")
+///     .expect("open store");
+/// ```
 pub struct SqliteStore {
     conn: Arc<StdMutex<Connection>>,
     account_cache: OnceCell<Arc<Mutex<Account>>>,
 }
 
 impl SqliteStore {
+    /// Open or create an encrypted database at `path`.
+    ///
+    /// Runs schema migrations if needed.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if the passphrase is wrong
+    ///   (SQLCipher fails to decrypt the header).
+    /// - [`LockNetError::InvalidResponse`] if the file cannot be opened, or
+    ///   if SQLCipher is not available in the linked SQLite build.
     pub fn open(path: impl AsRef<Path>, passphrase: &str) -> Result<Self> {
         let conn = Connection::open(path)
             .map_err(|e| LockNetError::InvalidResponse(format!("sqlite open: {e}")))?;
@@ -35,6 +66,12 @@ impl SqliteStore {
         })
     }
 
+    /// Open an in-memory encrypted database. Intended for tests and
+    /// short-lived clients.
+    ///
+    /// # Errors
+    ///
+    /// Same as [`SqliteStore::open`].
     pub fn open_in_memory(passphrase: &str) -> Result<Self> {
         let conn = Connection::open_in_memory()
             .map_err(|e| LockNetError::InvalidResponse(format!("sqlite open_in_memory: {e}")))?;
@@ -135,6 +172,10 @@ impl SqliteStore {
         Ok(())
     }
 
+    /// Explicitly flush the cached Olm account to the database.
+    ///
+    /// Equivalent to [`CryptoStore::save_account`]; provided as a
+    /// convenience method.
     pub async fn flush(&self) {
         self.save_account().await;
     }
@@ -161,6 +202,7 @@ impl Drop for SqliteStore {
     }
 }
 
+// ---- vodozemac pickle helpers ----
 
 fn olm_account_from_pickle_bytes(bytes: &[u8]) -> Option<OlmAccount> {
     let pickle: AccountPickle = serde_json::from_slice(bytes).ok()?;
@@ -182,6 +224,7 @@ fn inbound_group_session_from_pickle_bytes(bytes: &[u8]) -> Option<InboundGroupS
     Some(InboundGroupSession::from_pickle(pickle))
 }
 
+/// Serializable container for the three cross-signing private keys.
 #[derive(Serialize, Deserialize)]
 struct CrossSigningPickle {
     msk: Ed25519Keypair,
@@ -227,6 +270,7 @@ impl CryptoStore for SqliteStore {
         }
     }
 
+    // ---- Olm sessions ----
 
     async fn olm_sessions(&self, peer_session_id: i64) -> Vec<OlmSessionEntry> {
         let conn = match self.conn.lock() {
@@ -319,6 +363,7 @@ impl CryptoStore for SqliteStore {
         }
     }
 
+    // ---- Megolm outbound ----
 
     async fn megolm_outbound(&self, chat_id: i64) -> Option<Arc<Mutex<GroupSession>>> {
         let conn = self.conn.lock().ok()?;
@@ -367,6 +412,7 @@ impl CryptoStore for SqliteStore {
         }
     }
 
+    // ---- Megolm inbound ----
 
     async fn megolm_inbound(
         &self,
@@ -422,6 +468,7 @@ impl CryptoStore for SqliteStore {
             .unwrap_or_default()
     }
 
+    // ---- Cross-signing keys ----
 
     async fn cross_signing_keys(&self) -> Option<Arc<CrossSigningKeysPrivate>> {
         let conn = self.conn.lock().ok()?;
@@ -459,6 +506,7 @@ impl CryptoStore for SqliteStore {
         }
     }
 
+    // ---- Group policy state ----
 
     async fn group_data_state(&self, chat_id: i64) -> Option<GroupDataState> {
         let conn = self.conn.lock().ok()?;
@@ -547,6 +595,7 @@ impl CryptoStore for SqliteStore {
     }
 
     async fn olm_persist(&self, peer_session_id: i64, entries: &[OlmSessionEntry]) {
+        // Prepare pickles without holding the conn lock across `.await`.
         let mut prepared: Vec<(i64, Vec<u8>, String)> = Vec::with_capacity(entries.len());
         for (idx, entry) in entries.iter().enumerate() {
             let s = entry.session.lock().await;

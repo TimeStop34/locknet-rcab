@@ -1,10 +1,3 @@
-//! Unit-тесты для `SqliteStore`.
-//!
-//! Не требуют сервера — только временный файл на диске.
-//! Проверяют: schema/migrations, шифрование passphrase'ом,
-//! roundtrip всех типов (Account, Olm sessions, Megolm sessions,
-//! cross-signing, group_data), лимиты Olm-сессий.
-
 use std::sync::Arc;
 
 use locknet_rcab::core::crypto::{
@@ -19,7 +12,6 @@ use locknet_rcab::core::policies::{
     GroupData, GroupDataState, HistoryVisibility, MegolmRotationVisibility,
 };
 
-// ---- helpers ----
 
 fn tmp_db() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -36,18 +28,14 @@ async fn group_session_id(session: &Arc<tokio::sync::Mutex<vodozemac::megolm::Gr
     s.session_id()
 }
 
-// ============ 1. Открытие / схема ============
 
 #[tokio::test]
 async fn open_creates_schema() {
     let (_dir, path) = tmp_db();
     let store = SqliteStore::open(&path, "pass").expect("open");
 
-    // Проверяем, что БД реально создана и читается — попробуем
-    // прочитать пустой cross-signing.
     assert!(store.cross_signing_keys().await.is_none());
 
-    // Файл создан на диске.
     assert!(path.exists(), "db file must exist");
 }
 
@@ -57,7 +45,6 @@ async fn reopen_existing_db_works() {
 
     {
         let store = SqliteStore::open(&path, "pass").expect("open #1");
-        // Дадим ДБ немного "поработать"
         assert!(store.cross_signing_keys().await.is_none());
     }
 
@@ -65,7 +52,6 @@ async fn reopen_existing_db_works() {
     assert!(store.cross_signing_keys().await.is_none());
 }
 
-// ============ 2. Passphrase ============
 
 #[tokio::test]
 async fn wrong_passphrase_fails() {
@@ -73,7 +59,6 @@ async fn wrong_passphrase_fails() {
 
     {
         let _store = SqliteStore::open(&path, "correct").expect("open");
-        // Неявный drop.
     }
 
     let result = SqliteStore::open(&path, "wrong");
@@ -83,7 +68,6 @@ async fn wrong_passphrase_fails() {
     );
 }
 
-// ============ 3. Account ============
 
 #[tokio::test]
 async fn account_roundtrip_identity_keys() {
@@ -96,8 +80,6 @@ async fn account_roundtrip_identity_keys() {
             let acc = acc_arc.lock().await;
             (acc.ed25519_public_b64(), acc.curve25519_public_b64())
         };
-        // Явный flush: аккаунт живёт только в OnceCell, на диск
-        // попадает через save_account / Drop.
         store.save_account().await;
         (ed, curve)
     };
@@ -132,8 +114,6 @@ async fn account_mutations_persist_otks() {
     let acc_arc = store.account().await;
     let acc = acc_arc.lock().await;
     assert_eq!(acc.ed25519_public_b64(), ed, "same account after reopen");
-    // После mark_keys_as_published новых OTK нет (все "published"),
-    // но приватный ключ аккаунта тот же — что и проверяем через ed.
 }
 
 #[tokio::test]
@@ -154,7 +134,6 @@ async fn account_flush_method_works() {
     assert_eq!(ed, ed2);
 }
 
-// ============ 4. Cross-signing keys ============
 
 #[tokio::test]
 async fn cross_signing_keys_roundtrip() {
@@ -189,20 +168,17 @@ async fn cross_signing_keys_clear_works() {
     assert!(store.cross_signing_keys().await.is_none());
 }
 
-// ============ 5. Olm sessions ============
 
 #[tokio::test]
 async fn olm_session_roundtrip() {
     let (_dir, path) = tmp_db();
 
-    // Создаём два реальных Account'а и outbound-сессию между ними.
     let alice_acc = Account::new();
     let bob_acc = Account::new();
 
     let bob_curve_b64 = bob_acc.curve25519_public_b64();
     let bob_curve = curve_from_b64(&bob_curve_b64).expect("bob curve");
 
-    // Нужен один OTK у bob'а.
     let bob_otk = {
         let mut acc = bob_acc;
         acc.generate_one_time_keys(1);
@@ -220,35 +196,26 @@ async fn olm_session_roundtrip() {
         their_curve25519: bob_curve_b64.clone(),
     };
 
-    // Записываем.
     {
         let store = SqliteStore::open(&path, "pass").expect("open");
         store.olm_add(42, entry.clone()).await;
     }
 
-    // Читаем.
     let store = SqliteStore::open(&path, "pass").expect("reopen");
     let sessions = store.olm_sessions(42).await;
     assert_eq!(sessions.len(), 1, "one session stored");
     assert_eq!(sessions[0].their_curve25519, bob_curve_b64);
 
-    // Проверяем, что сессия функциональна: шифруем и расшифровываем.
     let plaintext = "hello via persisted olm";
     let encrypted = {
         let mut s = sessions[0].session.lock().await;
         encrypt_olm(&mut s, plaintext)
     };
 
-    // Восстановленный Session должен уметь шифровать — что уже проверено.
-    // Теперь проверим симметрично: создаём InboundSession из pickle? Не тривиально.
-    // Достаточно: encrypted.body непустой, message_type валидный.
     assert!(!encrypted.body.is_empty());
     assert!(encrypted.message_type == 0 || encrypted.message_type == 1);
 
-    // И расшифровка собственного сообщения через тот же Session (нормальный
-    // olm это позволяет в одну сторону; для полноты нужен второй Session,
-    // которого нет — поэтому ограничиваемся проверкой, что encrypted produced).
-    let _ = decrypt_olm; // use import
+    let _ = decrypt_olm;
 }
 
 #[tokio::test]
@@ -257,9 +224,6 @@ async fn olm_sessions_limited_to_max_5() {
 
     let store = SqliteStore::open(&path, "pass").expect("open");
 
-    // Создаём 7 разных "сессий" (по факту это просто dummy pickles).
-    // Используем реальный outbound-session — все 7 одинаковые, но под
-    // разными индексами — лимит считает по session_index, не по содержимому.
     let alice_acc = Account::new();
     let bob_acc = Account::new();
     let bob_curve = curve_from_b64(&bob_acc.curve25519_public_b64()).unwrap();
@@ -283,7 +247,6 @@ async fn olm_sessions_limited_to_max_5() {
     assert_eq!(sessions.len(), 5, "max 5 sessions per peer");
 }
 
-// ============ 6. Megolm outbound ============
 
 #[tokio::test]
 async fn megolm_outbound_roundtrip() {
@@ -308,17 +271,14 @@ async fn megolm_outbound_roundtrip() {
     assert_eq!(loaded_key, key, "session_key preserved");
 }
 
-// ============ 7. Megolm inbound ============
 
 #[tokio::test]
 async fn megolm_inbound_roundtrip() {
     let (_dir, path) = tmp_db();
 
-    // Alice создаёт outbound, шифрует сообщение.
     let (mut alice_session, key) = create_outbound_group();
     let ciphertext = alice_session.encrypt("secret message").to_base64();
 
-    // Bob импортирует inbound.
     let bob_inbound = import_inbound_group(&key).expect("import");
     let sid = bob_inbound.session_id();
 
@@ -329,7 +289,6 @@ async fn megolm_inbound_roundtrip() {
             .await;
     }
 
-    // Reopen, читаем, расшифровываем.
     let store = SqliteStore::open(&path, "pass").expect("reopen");
     let loaded = store.megolm_inbound(888, &sid).await.expect("inbound");
 
@@ -341,7 +300,6 @@ async fn megolm_inbound_roundtrip() {
     };
     assert_eq!(pt, "secret message", "decrypted via persisted session");
 
-    // megolm_inbound_all должен содержать наш ключ.
     let all = store.megolm_inbound_all().await;
     assert!(
         all.iter().any(|(cid, mid)| *cid == 888 && mid == &sid),
@@ -349,7 +307,6 @@ async fn megolm_inbound_roundtrip() {
     );
 }
 
-// ============ 8. Group data state ============
 
 #[tokio::test]
 async fn group_data_state_roundtrip() {
@@ -406,7 +363,6 @@ async fn group_data_state_remove_works() {
     assert!(store.group_data_state(1).await.is_none());
 }
 
-// ============ 9. In-memory smoke ============
 
 #[tokio::test]
 async fn open_in_memory_smoke() {
@@ -423,7 +379,6 @@ async fn open_in_memory_smoke() {
     assert_eq!(loaded.msk_pub_b64(), msk);
 }
 
-// ============ 10. SQLCipher sanity ============
 
 #[tokio::test]
 async fn db_file_is_encrypted_on_disk() {
@@ -435,8 +390,6 @@ async fn db_file_is_encrypted_on_disk() {
         store.cross_signing_keys_put(keys).await;
     }
 
-    // Читаем сырые байты файла. SQLite-магия "SQLite format 3\0"
-    // должна быть **зашифрована** — то есть в первых 16 байтах её не будет.
     let bytes = std::fs::read(&path).expect("read db file");
     assert!(bytes.len() > 16);
     let header = &bytes[0..16];

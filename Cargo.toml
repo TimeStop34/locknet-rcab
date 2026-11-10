@@ -1,6 +1,6 @@
 [package]
 name = "locknet-rcab"
-version = "0.1.0"
+version = "1.0.0-alpha"
 edition = "2021"
 rust-version = "1.75"
 description = "LockNet Rust Client-API Binding"

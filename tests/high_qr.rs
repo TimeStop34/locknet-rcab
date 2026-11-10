@@ -86,8 +86,6 @@ async fn qr_mode0_user_to_user_full_flow() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode2_self_device_full_flow() {
-    // mode 2: self-device, MSK не был доверен. Криптографически = mode 1 (MAC по ed25519).
-    // В тесте — два разных пользователя (MAC по ed25519 у каждого свой).
     let alice = common::register_new("hqr2_a").await;
     let bob = common::register_new("hqr2_b").await;
 

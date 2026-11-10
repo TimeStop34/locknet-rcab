@@ -79,7 +79,6 @@ async fn upload_keys_for_low(low: &LockNetLowAgent) {
     low.keys().upload(keys).await.expect("upload_keys");
 }
 
-// ============ WIRE-LEVEL TESTS ============
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_empty_then_new_version() {
@@ -285,7 +284,6 @@ async fn backup_isolated_between_users() {
     b.client.disconnect().await.ok();
 }
 
-// ============ REAL CRYPTO TESTS ============
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_export_import_roundtrip() {

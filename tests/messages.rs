@@ -242,7 +242,6 @@ async fn reactions_full_flow() {
 
     let mut alice_rx = alice_low.subscribe();
 
-    // Add
     bob_low
         .messages()
         .add_reaction(ack.message_id, "👍")
@@ -260,7 +259,6 @@ async fn reactions_full_flow() {
         _ => unreachable!(),
     }
 
-    // Duplicate — не должно быть второй push, count = 1
     bob_low
         .messages()
         .add_reaction(ack.message_id, "👍")
@@ -276,7 +274,6 @@ async fn reactions_full_flow() {
     assert_eq!(found.reactions[0].count, 1);
     assert_eq!(found.reactions[0].user_ids, vec![bob.session.user_id]);
 
-    // Remove
     let mut alice_rx2 = alice_low.subscribe();
     bob_low
         .messages()
@@ -294,7 +291,6 @@ async fn reactions_full_flow() {
         _ => unreachable!(),
     }
 
-    // Remove again → reaction_not_found
     let err = bob_low
         .messages()
         .remove_reaction(ack.message_id, "👍")
@@ -316,7 +312,6 @@ async fn session_mismatch_fails() {
 
     let alice_low = alice.low();
 
-    // sender_session_id deliberately wrong
     let enc = fake_enc(999_999_999, "bad session");
     let err = alice_low
         .messages()
@@ -339,7 +334,7 @@ async fn message_too_large_fails() {
 
     let alice_low = alice.low();
 
-    let big = "A".repeat(70_000); // 70000 bytes > 65536 limit
+    let big = "A".repeat(70_000);
     let enc = Encrypted {
         algorithm: "test.algorithm".into(),
         sender_key: "k".into(),

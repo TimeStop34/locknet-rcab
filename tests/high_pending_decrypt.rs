@@ -36,7 +36,6 @@ async fn message_decrypted_event_after_group_key() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "MD").await;
 
-    // Alice создаёт megolm-сессию вручную (без fan-out) и шлёт.
     let info = alice_low.megolm().create(group_id).await.expect("create");
     let enc = alice_low
         .megolm()
@@ -49,17 +48,13 @@ async fn message_decrypted_event_after_group_key() {
         .await
         .expect("send");
 
-    // Bob читает — text=None, pending=1
     let bob_chat = bob_agent.chat(group_id).await.expect("chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == ack.message_id).expect("msg");
     assert_eq!(msg.text, None, "без ключа text=None");
 
-    // Подписка ДО fan-out
     let mut bob_rx = bob_agent.subscribe();
 
-    // Alice раздаёт ключ — Bob получит group_key, decrypt_group_key,
-    // затем try_decrypt_pending → MessageDecrypted.
     alice_low
         .megolm()
         .share_group_key_with_session_key(
@@ -86,7 +81,6 @@ async fn message_decrypted_event_after_group_key() {
         _ => unreachable!(),
     }
 
-    // state.messages тоже обновлён — Chat::messages уже без повторного запроса
     let history2 = bob_chat.messages(None, 20).await.expect("messages 2");
     let msg2 = history2.iter().find(|m| m.id == ack.message_id).unwrap();
     assert_eq!(msg2.text.as_deref(), Some("pending secret"));
@@ -124,7 +118,6 @@ async fn multiple_pending_messages_all_decrypted() {
         ack_ids.push(ack.message_id);
     }
 
-    // Bob читает — все text=None
     let bob_chat = bob_agent.chat(group_id).await.expect("chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
     for id in &ack_ids {
@@ -132,7 +125,6 @@ async fn multiple_pending_messages_all_decrypted() {
         assert_eq!(m.text, None, "msg {id}: text=None");
     }
 
-    // Подписка ДО fan-out
     let mut bob_rx = bob_agent.subscribe();
 
     alice_low
@@ -147,7 +139,6 @@ async fn multiple_pending_messages_all_decrypted() {
         .await
         .expect("share");
 
-    // Должны получить 3 MessageDecrypted
     let mut received = Vec::new();
     for _ in 0..30 {
         match tokio::time::timeout(Duration::from_millis(200), bob_rx.recv()).await {
@@ -170,7 +161,6 @@ async fn multiple_pending_messages_all_decrypted() {
         assert_eq!(text, format!("msg-{expected_idx}"), "text for msg {mid}");
     }
 
-    // state обновлён
     let history2 = bob_chat.messages(None, 20).await.expect("messages 2");
     for (i, id) in ack_ids.iter().enumerate() {
         let m = history2.iter().find(|m| m.id == *id).unwrap();

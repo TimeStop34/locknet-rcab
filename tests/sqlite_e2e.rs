@@ -1,12 +1,3 @@
-//! E2E тесты `SqliteStore` с реальным сервером.
-//!
-//! **Литеральный** рестарт: setup в блоке `{}`, всё дропается, затем
-//! **новый блок** открывает `SqliteStore` на тех же путях и проверяет,
-//! что состояние восстановилось из БД.
-//!
-//! Эти тесты **падают** с `InMemoryStore` (state в памяти) и **проходят**
-//! только с `SqliteStore` — что и есть цель тестов.
-
 mod common;
 
 use std::path::PathBuf;
@@ -18,7 +9,6 @@ use locknet_rcab::{
 };
 use tokio::sync::broadcast;
 
-// ---- helpers ----
 
 fn tmp_db() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -75,7 +65,6 @@ async fn warmup_olm(
     a_low.olm().decrypt(p).wait().await.expect("decrypt-rev");
 }
 
-// ============ tests ============
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn account_identity_survives_literal_restart() {
@@ -102,7 +91,6 @@ async fn account_identity_survives_literal_restart() {
         alice.disconnect().await.ok();
         (s.user_id, s.session_id, s.rjwt, ed)
     };
-    // BLOCK 1 ENDS — client, low_agent, store all dropped.
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
@@ -338,7 +326,6 @@ async fn megolm_inbound_survives_literal_restart() {
         })
         .await;
 
-        // Sanity: bob расшифровывает до restart
         let bob_chat = bob_agent.chat(gid).await.expect("bob chat");
         let h = bob_chat.messages(None, 20).await.expect("msgs");
         assert_eq!(
@@ -369,7 +356,6 @@ async fn megolm_inbound_survives_literal_restart() {
         .await
         .expect("bob reconnect");
 
-        // Bob после literal restart должен расшифровать историю
         let bob_agent = bob.get_agent().expect("bob agent 2");
         let bob_chat = bob_agent.chat(group_id).await.expect("bob chat 2");
         let history = bob_chat.messages(None, 20).await.expect("msgs 2");
@@ -418,16 +404,10 @@ async fn olm_session_survives_literal_restart() {
             .await
             .expect("bob reg");
 
-        // Полный warmup (forward + reverse). После reverse Alice получает
-        // Normal-сообщение, её Outbound-сессия становится established
-        // (`has_received_message = true`), и последующие encrypt дают
-        // NormalMessage (type=1), а не PreKey.
         let alice_low = alice.get_low_agent().expect("alice low");
         let bob_low = bob.get_low_agent().expect("bob low");
         warmup_olm(&alice_low, &bob_low, bob_s.user_id, bob_s.session_id).await;
 
-        // Sanity: у Alice одна Outbound-entry к Bob'у (reverse warmup
-        // создаёт Inbound-entry только у Bob'а, не у Alice).
         let pre = alice_low.store().olm_sessions(bob_s.session_id).await;
         assert_eq!(
             pre.len(),
@@ -461,7 +441,6 @@ async fn olm_session_survives_literal_restart() {
         let alice_low = alice.get_low_agent().expect("alice low 2");
         let bob_low = bob.get_low_agent().expect("bob low 2");
 
-        // Sanity: после literal restart olm-сессия должна быть в БД.
         let post = alice_low.store().olm_sessions(bob_sid).await;
         assert!(
             !post.is_empty(),
@@ -518,8 +497,8 @@ async fn megolm_rotation_meta_survives_literal_restart() {
 
     let (alice_rjwt, bob_rjwt, group_id, s1) = {
         let mut alice_cfg = common::test_config();
-        alice_cfg.megolm_rotation_message_count = 100; // не триггерим
-        alice_cfg.megolm_rotation_ttl_secs = 0;        // не триггерим
+        alice_cfg.megolm_rotation_message_count = 100;
+        alice_cfg.megolm_rotation_ttl_secs = 0;
         let mut alice = {
             let store = Arc::new(SqliteStore::open(&alice_db, pw).expect("sqlite open"));
             LockNetClient::with_store(alice_cfg, store)
@@ -567,7 +546,6 @@ async fn megolm_rotation_meta_survives_literal_restart() {
             .await
             .expect("accept");
 
-        // Создаём сессию и шлём 3 сообщения (meta.messages_sent = 3)
         let info = alice_low.megolm().create(gid).await.expect("create mg");
         let s1 = info.megolm_session_id.clone();
 
@@ -579,7 +557,6 @@ async fn megolm_rotation_meta_survives_literal_restart() {
                 .expect("encrypt");
         }
 
-        // Sanity: meta существует, messages_sent = 3
         let meta = alice_low
             .store()
             .megolm_outbound_meta(gid)
@@ -619,7 +596,6 @@ async fn megolm_rotation_meta_survives_literal_restart() {
 
         let alice_low = alice.get_low_agent().expect("alice low 2");
 
-        // Meta должна пережить restart: messages_sent = 3, session_id = s1
         let meta_after = alice_low
             .store()
             .megolm_outbound_meta(group_id)
@@ -628,7 +604,6 @@ async fn megolm_rotation_meta_survives_literal_restart() {
         assert_eq!(meta_after.messages_sent, 3, "counter preserved");
         assert_eq!(meta_after.session_id, s1, "session_id preserved");
 
-        // ensure_session не должен ротировать (count=100, ttl=0)
         let (info, rotated) = alice_low
             .megolm()
             .ensure_session(group_id)

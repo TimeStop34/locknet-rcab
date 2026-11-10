@@ -8,7 +8,6 @@ use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{Credentials, HighEvent, LockNetClient, LockNetLowAgent};
 use tokio::sync::broadcast;
 
-// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -34,8 +33,6 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     }
 }
 
-/// Создаёт cross-signing для low (MSK/SSK/USK) и подписывает ed25519
-/// **текущей** сессии своим SSK. Возвращает приватные ключи.
 async fn setup_cross_signing(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
     let user_id = low.user_id();
     let session_id = low.session_id();
@@ -63,7 +60,6 @@ async fn setup_cross_signing(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
     keys
 }
 
-/// Подписывает ed25519 target_session SSK этого low и загружает сигнатуру.
 async fn sign_other_session(
     low: &LockNetLowAgent,
     keys: &CrossSigningKeysPrivate,
@@ -112,7 +108,6 @@ where
     }
 }
 
-// ---- tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_device_recovers_history_from_sibling_device() {
@@ -126,12 +121,10 @@ async fn new_device_recovers_history_from_sibling_device() {
     let bob1_agent = bob.client.get_agent().expect("bob agent");
     let bob1_low = bob1_agent.low();
 
-    // 1. Cross-signing для Bob1: SSK создан, ed25519 Bob1 подписан
     let bob_cs = setup_cross_signing(&bob1_low).await;
 
     let group_id = common::setup_group_with_two(&alice, &bob, "HKR").await;
 
-    // 2. Alice шлёт 2 сообщения — fan-out на Bob1
     let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
     let mut bob1_rx = bob1_agent.subscribe();
 
@@ -154,7 +147,6 @@ async fn new_device_recovers_history_from_sibling_device() {
         Some("history-1")
     );
 
-    // 3. Bob2 — новое устройство через Login (новый session_id)
     let mut bob2_client = LockNetClient::new(common::test_config());
     let bob2_session = bob2_client
         .connection_request(Credentials::Login {
@@ -167,14 +159,11 @@ async fn new_device_recovers_history_from_sibling_device() {
     let bob2_sid = bob2_session.session_id;
     assert_ne!(bob2_sid, bob1_sid, "Login должен создать новую сессию");
     let bob2_low = bob2_client.get_low_agent().expect("bob2 low");
-    // client.rs для Login сам делает upload_keys — вручную не нужно
 
-    // 4. Bob1 подписывает ed25519 Bob2 своим SSK (кросс-верификация устройства)
     sign_other_session(&bob1_low, &bob_cs, bob_uid, bob2_sid).await;
 
     let bob2_agent = bob2_client.get_agent().expect("bob2 high");
 
-    // 5. Bob2 видит историю, но с text=None
     let bob2_chat = bob2_agent.chat(group_id).await.expect("bob2 chat");
     let history_unread = bob2_chat.messages(None, 20).await.expect("bob2 messages");
     let m1_unread = history_unread.iter().find(|m| m.id == m1.id).expect("m1 in history");
@@ -182,7 +171,6 @@ async fn new_device_recovers_history_from_sibling_device() {
     assert_eq!(m1_unread.text, None, "у Bob2 нет ключа для m1");
     assert_eq!(m2_unread.text, None, "у Bob2 нет ключа для m2");
 
-    // 6. Запрашиваем у Bob1 (sibling device, verified через SSK)
     let (pending_count, imported) = bob2_chat
         .request_missing_keys()
         .await
@@ -190,15 +178,11 @@ async fn new_device_recovers_history_from_sibling_device() {
     assert!(pending_count >= 2, "pending_count={pending_count}");
     assert!(imported >= 1, "imported={imported}");
 
-    // Фикс: sibling-recovery через key_request передаёт group_data — Bob2
-    // должен получить policy. Без этого Chat::ensure_policy_known откажет
-    // на send после recovery (read работает, write — нет).
     assert!(
         bob2_low.store().group_data_state(group_id).await.is_some(),
         "Bob2 должен получить group_data через key_request"
     );
 
-    // 7. Повторно читаем — расшифровывается
     let history_read = bob2_chat.messages(None, 20).await.expect("bob2 messages #2");
     let m1_read = history_read.iter().find(|m| m.id == m1.id).expect("m1 #2");
     let m2_read = history_read.iter().find(|m| m.id == m2.id).expect("m2 #2");
@@ -243,7 +227,6 @@ async fn untrusted_member_is_denied() {
 
     let alice_agent = alice.client.get_agent().expect("alice agent");
     let bob_agent = bob.client.get_agent().expect("bob agent");
-    // Charlie — через low, чтобы не создавать agent (иначе race за Olm-сессию)
     let charlie_low = charlie.low();
 
     let group = alice_agent

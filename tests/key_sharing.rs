@@ -8,7 +8,6 @@ use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, DeviceKeys, Signatures};
 use locknet_rcab::{Credentials, Event, LockNetClient, LockNetLowAgent};
 
-// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -109,7 +108,6 @@ async fn setup_olm(
     a_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
 }
 
-// ---- tests ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_full_flow() {
@@ -140,7 +138,6 @@ async fn key_sharing_full_flow() {
     assert!(bob_low.megolm().decrypt(group_id, &enc1).await.unwrap().is_none());
     assert!(bob_low.megolm().decrypt(group_id, &enc2).await.unwrap().is_none());
 
-    // Bob подписывается на alice перед request
     let mut alice_rx = alice_low.subscribe();
     let mut bob_flow = bob_low
         .key_sharing()
@@ -514,11 +511,9 @@ async fn key_sharing_second_device_recovers_history() {
         "for history"
     );
 
-    // Bob1 offline
     let mut bob1 = bob;
     bob1.client.disconnect().await.ok();
 
-    // Bob2 reconnect (Session credentials)
     let mut bob2_client = LockNetClient::new(common::test_config());
     let bob2_session = bob2_client
         .connection_request(Credentials::Session {
@@ -530,9 +525,6 @@ async fn key_sharing_second_device_recovers_history() {
     let bob2_low = bob2_client.get_low_agent().expect("bob2 low");
     let bob2_sid = bob2_session.session_id;
 
-    // ВАЖНО: Session credentials не вызывают upload_keys в client.rs,
-    // и на сервере session.curve25519_key остаётся от bob1.
-    // Нужно вручную загрузить ключи bob2, чтобы сервер перезаписал их.
     upload_keys_for_low(&bob2_low).await;
 
     setup_olm(&alice_low, &bob2_low, bob_uid, bob2_sid).await;
@@ -592,7 +584,6 @@ async fn key_sharing_second_device_recovers_history() {
     }
     assert_eq!(imported, 1);
 
-    // Фикс: key_request теперь передаёт group_data — у Bob2 должна появиться policy
     assert!(
         bob2_low.store().group_data_state(group_id).await.is_some(),
         "Bob2 должен получить group_data через key_request"

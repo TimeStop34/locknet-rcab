@@ -82,7 +82,6 @@ async fn bob_receives_message_updated() {
     let bob_agent = bob.client.get_agent().expect("bob agent");
     let group_id = common::setup_group_with_two(&alice, &bob, "HEUpd").await;
 
-    // Подписка ДО send — иначе NewMessage улетит мимо
     let mut rx = bob_agent.subscribe();
 
     let ack = alice_low
@@ -94,13 +93,11 @@ async fn bob_receives_message_updated() {
         .await
         .expect("send");
 
-    // Дожидаемся NewMessage, чтобы state точно пополнился (process_event уже сработал)
     let _ = wait_high_event(&mut rx, |e| {
         matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id)
     })
     .await;
 
-    // edit — ждём MessageUpdated на той же подписке
     alice_low
         .messages()
         .edit(
@@ -244,7 +241,6 @@ async fn bob_state_reaction_added_and_removed() {
     let bob_agent = bob.client.get_agent().expect("bob agent");
     let group_id = common::setup_group_with_two(&alice, &bob, "HERst").await;
 
-    // Подписка ДО send
     let mut rx = bob_agent.subscribe();
 
     let ack = alice_low
@@ -261,7 +257,6 @@ async fn bob_state_reaction_added_and_removed() {
     })
     .await;
 
-    // Bob добавляет реакцию
     bob_low
         .messages()
         .add_reaction(ack.message_id, "🎉")
@@ -279,7 +274,6 @@ async fn bob_state_reaction_added_and_removed() {
     assert_eq!(cached.reactions[0].count, 1);
     assert_eq!(cached.reactions[0].user_ids, vec![bob.session.user_id]);
 
-    // Remove — реакция исчезает полностью
     bob_low
         .messages()
         .remove_reaction(ack.message_id, "🎉")
@@ -355,7 +349,6 @@ async fn alice_receives_membership_added_and_left() {
         .await
         .expect("create");
 
-    // Подписка ДО join
     let mut alice_rx = alice_agent.subscribe();
 
     bob_low
@@ -381,7 +374,6 @@ async fn alice_receives_membership_added_and_left() {
         _ => unreachable!(),
     }
 
-    // leave — та же подписка, дождёмся следующего события
     bob_low
         .groups()
         .leave(group.id)

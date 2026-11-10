@@ -113,7 +113,6 @@ fn b64_no_pad(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
 }
 
-// ---- tests (сами тесты — те же, что были, без изменений) ----
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode0_user_to_user_full_flow() {

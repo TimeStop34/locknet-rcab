@@ -3,8 +3,8 @@
 pkgs.mkShell {
   nativeBuildInputs = [
     pkgs.pkg-config
-    pkgs.cargo
-    pkgs.rustc
+    # pkgs.cargo # Убрано в пользу системного ( в связи с использованием rustup / cargo + rustc / rustoverlay )
+    # pkgs.rustc
   ];
 
   buildInputs = [
