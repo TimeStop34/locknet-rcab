@@ -24,7 +24,7 @@ The crate is not published on crates.io. Add it to your `Cargo.toml` via git:
 
 ```toml
 [dependencies]
-locknet-rcab = { git = "https://github.com/TimeStop34/locknet-rcab", tag = "v1.0.0-alpha" }
+locknet-rcab = { git = "https://github.com/TimeStop34/locknet-rcab" }
 ```
 
 Or pin to a specific commit:
