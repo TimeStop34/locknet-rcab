@@ -284,7 +284,7 @@ async fn olm_sessions_limited_to_max_5() {
     bob_acc.generate_one_time_keys(1);
     let bob_otk = {
         let otks = bob_acc.one_time_keys_b64();
-        curve_from_b64(&otks.values().next().unwrap()).unwrap()
+        curve_from_b64(otks.values().next().unwrap()).unwrap()
     };
 
     for _ in 0..7 {

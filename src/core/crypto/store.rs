@@ -143,11 +143,15 @@ pub trait CryptoStore: Send + Sync {
 ///
 /// State is lost on process exit. All operations use `tokio::sync::Mutex`, so
 /// they are safe to call concurrently.
+type MegolmOutboundMap = Arc<Mutex<HashMap<i64, (Arc<Mutex<GroupSession>>, String)>>>;
+type MegolmInboundMap =
+    Arc<Mutex<HashMap<(i64, String), Arc<Mutex<InboundGroupSession>>>>>;
+
 pub struct InMemoryStore {
     account: Arc<Mutex<Account>>,
     olm_sessions: Arc<Mutex<HashMap<i64, Vec<OlmSessionEntry>>>>,
-    megolm_out: Arc<Mutex<HashMap<i64, (Arc<Mutex<GroupSession>>, String)>>>,
-    megolm_in: Arc<Mutex<HashMap<(i64, String), Arc<Mutex<InboundGroupSession>>>>>,
+    megolm_out: MegolmOutboundMap,
+    megolm_in: MegolmInboundMap,
     cross_signing: Arc<Mutex<Option<Arc<CrossSigningKeysPrivate>>>>,
     group_data: Arc<Mutex<HashMap<i64, GroupDataState>>>,
     megolm_out_meta: Arc<Mutex<HashMap<i64, MegolmOutboundMeta>>>,

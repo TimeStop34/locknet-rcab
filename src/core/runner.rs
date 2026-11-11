@@ -152,6 +152,7 @@ async fn run_once(
     .await
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_ws(
     config: &LockNetConfig,
     mut ws: ws::Ws,
@@ -163,9 +164,7 @@ async fn run_ws(
     ajwt: &mut String,
 ) -> Result<()> {
     let auth_msg = json!({ "type": "auth", "id": "auth-1", "data": { "token": ajwt } });
-    ws.send(WsMessage::Text(auth_msg.to_string().into()))
-        .await
-        .map_err(LockNetError::Ws)?;
+    ws.send(WsMessage::Text(auth_msg.to_string())).await?;
 
     let mut ping = tokio::time::interval(config.ws_ping_interval);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -177,7 +176,7 @@ async fn run_ws(
             msg = ws.next() => {
                 let msg = match msg {
                     Some(Ok(m)) => m,
-                    Some(Err(e)) => return Err(LockNetError::Ws(e)),
+                    Some(Err(e)) => return Err(LockNetError::Ws(Box::new(e))),
                     None => return Err(LockNetError::RunnerDown),
                 };
                 let text = match msg {
@@ -247,8 +246,8 @@ async fn run_ws(
                             obj.insert("id".into(), json!(req_id));
                         }
                         pending.lock().await.insert(req_id, reply);
-                        if let Err(e) = ws.send(WsMessage::Text(payload.to_string().into())).await {
-                            return Err(LockNetError::Ws(e));
+                        if let Err(e) = ws.send(WsMessage::Text(payload.to_string())).await {
+                            return Err(LockNetError::Ws(Box::new(e)));
                         }
                     }
                     None => {
@@ -258,8 +257,8 @@ async fn run_ws(
                 }
             }
             _ = ping.tick() => {
-                if let Err(e) = ws.send(WsMessage::Ping(Vec::new().into())).await {
-                    return Err(LockNetError::Ws(e));
+                if let Err(e) = ws.send(WsMessage::Ping(Vec::new())).await {
+                    return Err(LockNetError::Ws(Box::new(e)));
                 }
             }
         }

@@ -134,7 +134,6 @@ pub async fn connect(config: &LockNetConfig) -> Result<Ws> {
         false,
         Some(connector),
     )
-    .await
-    .map_err(LockNetError::Ws)?;
+    .await?;
     Ok(ws)
 }

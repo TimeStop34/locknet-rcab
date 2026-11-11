@@ -9,17 +9,21 @@ use thiserror::Error;
 /// [`LockNetError::Server`] with the machine-readable `code` and human-readable
 /// `message` from the server.
 ///
+/// Transport errors are boxed to keep `LockNetError` small (≈ 50 bytes on
+/// 64-bit platforms) — unboxed `tungstenite::Error` alone is 136 bytes, which
+/// bloats every `Result<T, LockNetError>` in the crate.
+///
 /// `LockNetError` implements [`std::error::Error`] via `thiserror`, so it can be
 /// used with `?` and `Box<dyn Error>` interchangeably.
 #[derive(Debug, Error)]
 pub enum LockNetError {
     /// HTTP transport error (TLS, DNS, connection reset, etc.).
     #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
+    Http(Box<reqwest::Error>),
 
     /// WebSocket transport error.
     #[error("WebSocket error: {0}")]
-    Ws(#[from] tokio_tungstenite::tungstenite::Error),
+    Ws(Box<tokio_tungstenite::tungstenite::Error>),
 
     /// JSON (de)serialization error.
     #[error("JSON error: {0}")]
@@ -70,6 +74,18 @@ pub enum LockNetError {
     /// Malformed argument passed to an API method.
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
+}
+
+impl From<reqwest::Error> for LockNetError {
+    fn from(e: reqwest::Error) -> Self {
+        Self::Http(Box::new(e))
+    }
+}
+
+impl From<tokio_tungstenite::tungstenite::Error> for LockNetError {
+    fn from(e: tokio_tungstenite::tungstenite::Error) -> Self {
+        Self::Ws(Box::new(e))
+    }
 }
 
 impl LockNetError {

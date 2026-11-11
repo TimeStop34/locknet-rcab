@@ -264,10 +264,7 @@ impl LockNetClient {
             cmd_tx.clone(),
             self.event_tx.clone(),
             self.store.clone(),
-            self.config.default_history_visibility,
-            self.config.default_megolm_rotation_visibility,
-            self.config.megolm_rotation_message_count,
-            self.config.megolm_rotation_ttl_secs,
+            &self.config,
         ));
 
         if is_fresh {
