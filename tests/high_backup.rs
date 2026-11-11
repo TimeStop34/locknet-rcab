@@ -1,3 +1,22 @@
+//! Backup via the high-level API.
+//!
+//! Covers `SecurityHelper::backup_*()`. These are thin wrappers over
+//! `LockNetLowAgent::backup().export/import/versions/get/delete` that
+//! additionally expose `backup_export_default()` — a shortcut that generates
+//! a fresh `RecoveryKey`, exports, and returns both.
+//!
+//! The underlying crypto (HKDF, XSalsa20-Poly1305, auth_data fingerprint) is
+//! the same as in `tests/backup.rs`; this file verifies that the high-level
+//! wrappers preserve the contract, in particular:
+//!
+//! - `backup_export_default()` returns a `RecoveryKey` whose bytes match the
+//!   `auth_data.public_key` derived by `import`.
+//! - A second device can recover historical messages via `backup_import`.
+//! - Wrong recovery key fails at the auth_data check.
+//!
+//! Not covered here: low-level wire and crypto tests (`tests/backup.rs`),
+//! key request recovery (`tests/high_key_request.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -25,6 +44,13 @@ where
     }
 }
 
+/// Full export/import via `SecurityHelper::backup_*`.
+///
+/// Verifies:
+/// - `backup_export_default()` returns a non-empty version and at least one
+///   uploaded item;
+/// - a fresh client (Alice2) can `backup_import` with the returned key;
+/// - imported sessions decrypt historical messages via `Chat::messages`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn high_backup_export_import_roundtrip() {
     let alice = common::register_new("hbk_a").await;
@@ -43,10 +69,9 @@ async fn high_backup_export_import_roundtrip() {
     })
     .await;
 
-    // Export через security
     let (recovery, export) = alice_sec.backup_export_default().await.expect("export_default");
     assert!(export.version >= 1);
-    assert!(export.items_uploaded >= 1, "должно быть >=1 megolm-сессий");
+    assert!(export.items_uploaded >= 1, "at least one Megolm session expected");
 
     let mut alice2_client = LockNetClient::new(common::test_config());
     let alice2_session = alice2_client
@@ -64,9 +89,8 @@ async fn high_backup_export_import_roundtrip() {
 
     let unread = alice2_chat.messages(None, 20).await.expect("alice2 messages");
     let msg_unread = unread.iter().find(|m| m.id == sent.id).expect("msg in history");
-    assert_eq!(msg_unread.text, None, "без ключа текст не расшифрован");
+    assert_eq!(msg_unread.text, None, "without the key, text is None");
 
-    // Import через security
     let import = alice2_sec
         .backup_import(export.version, &recovery)
         .await
@@ -85,6 +109,8 @@ async fn high_backup_export_import_roundtrip() {
     b.client.disconnect().await.ok();
 }
 
+/// Importing with the wrong recovery key fails with `InvalidArgument` and
+/// mentions the recovery key (the auth_data check runs first).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn high_backup_wrong_recovery_key_fails() {
     let alice = common::register_new("hbkw_a").await;
@@ -117,7 +143,7 @@ async fn high_backup_wrong_recovery_key_fails() {
         .unwrap_err();
     match err {
         locknet_rcab::LockNetError::InvalidArgument(msg) => {
-            assert!(msg.contains("recovery key"), "unexpected: {msg}");
+            assert!(msg.contains("recovery key"), "unexpected message: {msg}");
         }
         other => panic!("expected InvalidArgument, got {other:?}"),
     }
@@ -129,6 +155,8 @@ async fn high_backup_wrong_recovery_key_fails() {
     b.client.disconnect().await.ok();
 }
 
+/// `backup_versions()` returns all created versions; `backup_delete(v)`
+/// removes one without affecting the others.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn high_backup_versions_and_delete() {
     let alice = common::register_new("hbkv_a").await;

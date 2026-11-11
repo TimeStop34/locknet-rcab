@@ -1,6 +1,13 @@
+//! Group lifecycle tests.
+//!
+//! Covers creation, invitations, joining, leaving, and the distinctions
+//! between public and private groups. All tests assert on the wire-level
+//! [`locknet_rcab::models::Group`] DTO returned by the low-level helpers.
+
 mod common;
 
-
+/// Creating a group only adds the creator as a member; participants receive
+/// invites but are not auto-joined.
 #[tokio::test]
 async fn create_group_only_creator_is_member() {
     let alice = common::register_new("grp_create_a").await;
@@ -37,6 +44,8 @@ async fn create_group_only_creator_is_member() {
     bob.client.disconnect().await.ok();
 }
 
+/// Accepting an invite adds the member to both the server-side and client-side
+/// member lists.
 #[tokio::test]
 async fn accept_invite_adds_member() {
     let alice = common::register_new("grp_accept_a").await;
@@ -70,6 +79,8 @@ async fn accept_invite_adds_member() {
     bob.client.disconnect().await.ok();
 }
 
+/// Once an invite is accepted, it is consumed — a second accept fails with
+/// `invite_not_found`.
 #[tokio::test]
 async fn accept_invite_twice_fails() {
     let alice = common::register_new("grp_acc2_a").await;
@@ -97,6 +108,7 @@ async fn accept_invite_twice_fails() {
     bob.client.disconnect().await.ok();
 }
 
+/// Declining an invite consumes it and leaves the user outside the group.
 #[tokio::test]
 async fn decline_invite_works() {
     let alice = common::register_new("grp_decl_a").await;
@@ -128,6 +140,8 @@ async fn decline_invite_works() {
     bob.client.disconnect().await.ok();
 }
 
+/// A member leaving a private group removes them from the member list, and
+/// the remaining member sees the updated list.
 #[tokio::test]
 async fn member_leave_removes_from_group() {
     let alice = common::register_new("grp_leave_a").await;
@@ -153,6 +167,8 @@ async fn member_leave_removes_from_group() {
     bob.client.disconnect().await.ok();
 }
 
+/// If the creator leaves, the group is deleted, all members are evicted, and
+/// pending invites become invalid.
 #[tokio::test]
 async fn creator_leave_deletes_group() {
     let alice = common::register_new("grp_cleave_a").await;
@@ -184,6 +200,7 @@ async fn creator_leave_deletes_group() {
     bob.client.disconnect().await.ok();
 }
 
+/// Creating a direct chat produces a private group with a generated name.
 #[tokio::test]
 async fn create_direct_creates_private_group() {
     let alice = common::register_new("grp_dir_a").await;
@@ -216,6 +233,8 @@ async fn create_direct_creates_private_group() {
     bob.client.disconnect().await.ok();
 }
 
+/// Public groups are visible to non-members (but `members = None`), and
+/// joining by `public_id` works exactly once.
 #[tokio::test]
 async fn public_group_join_and_already_member() {
     let alice = common::register_new("grp_pub_a").await;
@@ -254,6 +273,8 @@ async fn public_group_join_and_already_member() {
     bob.client.disconnect().await.ok();
 }
 
+/// Private groups return `group_not_found` to non-members (this hides their
+/// existence rather than revealing a 403).
 #[tokio::test]
 async fn private_group_not_visible_to_non_member() {
     let alice = common::register_new("grp_priv_a").await;
@@ -277,6 +298,7 @@ async fn private_group_not_visible_to_non_member() {
     bob.client.disconnect().await.ok();
 }
 
+/// `get_groups` returns the groups the user is a member of.
 #[tokio::test]
 async fn get_groups_lists_member_groups() {
     let alice = common::register_new("grp_list_a").await;

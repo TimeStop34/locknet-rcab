@@ -1,3 +1,31 @@
+//! QR via the high-level API.
+//!
+//! Covers `SecurityHelper::qr_*()`. The QR protocol itself is the same as
+//! in `tests/qr.rs` (low-level); the differences at this layer:
+//!
+//! - `qr_display` / `qr_scan` register the flow in `state.active_qr` and
+//!   return the `transaction_id` (displayer also gets the `QrCode`).
+//! - `qr_exchange_mac(txid)` automatically resolves the peer's MAC key from
+//!   the peer's published keys (`query_cross_signing_keys` for mode 0,
+//!   `query_keys` for modes 1/2), so the caller does not pass `peer_key_b64`.
+//! - On `Verified`, the flow writes to `state.verified_users` /
+//!   `state.verified_sessions` and emits `SessionVerified` / `UserVerified`.
+//! - `qr_cancel(txid)` removes the flow; a subsequent `qr_next(txid)`
+//!   returns `InvalidArgument`.
+//!
+//! What is verified:
+//!
+//! - Mode 0 (user-to-user, MAC of MSK): both sides `Verified`, both
+//!   `is_user_verified` and `is_session_verified` true.
+//! - Mode 2 (self-device, MAC of ed25519): same invariants, prefix
+//!   `LockNetProtocol;v1.0;2;`.
+//! - Cancel from `WaitingScanned`: flow removed, next call fails with
+//!   `InvalidArgument`.
+//!
+//! Not covered here: low-level QR (`tests/qr.rs`), mode 1 (needs the
+//! creator's cross-signing private keys on a second device — deferred to
+//! the manual/exploratory test in `tests/qr.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -8,6 +36,7 @@ async fn setup_cs(agent: &locknet_rcab::LockNetAgent) {
     agent.security().setup_cross_signing().await.expect("setup_cross_signing");
 }
 
+/// Mode 0 full flow.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode0_user_to_user_full_flow() {
     let alice = common::register_new("hqr0_a").await;
@@ -84,6 +113,8 @@ async fn qr_mode0_user_to_user_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// Mode 2 full flow (MAC of ed25519; cryptographically identical to mode 1
+/// but with different QR prefix and different post-flow semantics).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode2_self_device_full_flow() {
     let alice = common::register_new("hqr2_a").await;
@@ -148,6 +179,8 @@ async fn qr_mode2_self_device_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// `qr_cancel` from the initial state removes the flow; subsequent calls to
+/// `qr_next` fail with `InvalidArgument`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_cancel_returns_cancelled() {
     let alice = common::register_new("hqrc_a").await;

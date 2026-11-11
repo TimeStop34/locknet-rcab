@@ -1,3 +1,46 @@
+//! `MegolmRotationVisibility` policy enforcement.
+//!
+//! The policy controls **who receives a Megolm key when the session is
+//! rotated** (including the initial `Chat::send` fan-out). Enforced by
+//! `fan_out_group_key` in `api/high/group_key.rs`, which is called from
+//! `Chat::send` and from `process_event` on membership changes.
+//!
+//! Three values:
+//!
+//! - **AllMembers** — fan-out to every session of every member.
+//! - **OnlyVerifiedSessions** — only to sessions whose `ed25519` is signed
+//!   by the owner's SSK (session-verified).
+//! - **OnlyVerifiedUsers** — only to sessions that are both
+//!   session-verified and whose owner is trusted via the Web of Trust
+//!   (`USK -> MSK` chain from the sender).
+//!
+//! What is verified:
+//!
+//! - `AllMembers` reaches every session, including those without CS.
+//! - `OnlyVerifiedSessions` delivers to a session-verified recipient (Bob)
+//!   and skips an unverified one (Charlie without CS).
+//! - `OnlyVerifiedUsers` skips a session-verified recipient who has not been
+//!   `USK`-verified; after the sender uploads a `USK -> MSK` signature, the
+//!   recipient receives the key.
+//! - After a member leaves under `OnlyVerifiedSessions`, the rotated key
+//!   does not reach the departed member.
+//!
+//! Test pattern: the test sends a message through `Chat::send` (which
+//! performs fan-out) and asserts on decryption at the peer via
+//! `HighEvent::NewMessage`. `set_megolm_visibility(...)` overwrites the
+//! local `GroupDataState` (bumping `version`), so the fan-out picks up the
+//! new policy — the server does not enforce policies.
+//!
+//! Requirements:
+//!
+//! - Alice is the creator (she calls `Chat::send`); Bob and (in some tests)
+//!   Charlie are members.
+//! - Cross-signing (`setup_cs`) is only needed for the "verified" variants.
+//!
+//! Not covered here: `HistoryVisibility` enforcement
+//! (`tests/history_visibility.rs`), WoT transitive trust
+//! (`tests/trust_graph.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -8,6 +51,8 @@ use locknet_rcab::core::policies::MegolmRotationVisibility;
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{HighEvent, LockNetLowAgent};
 use tokio::sync::broadcast;
+
+// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -51,6 +96,7 @@ async fn setup_cs(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
     keys
 }
 
+/// Sign the target user's MSK with the signer's USK.
 async fn sign_msk(signer_low: &LockNetLowAgent, signer_keys: &CrossSigningKeysPrivate, target_uid: i64) {
     let query = signer_low.crypto().query_cross_signing_keys(vec![target_uid]).await.unwrap();
     let target_msk = query.get(&target_uid).map(|u| u.master_key.key.clone()).unwrap();
@@ -61,6 +107,8 @@ async fn sign_msk(signer_low: &LockNetLowAgent, signer_keys: &CrossSigningKeysPr
     }).await.unwrap();
 }
 
+/// Overwrite `GroupDataState.megolm_rotation_visibility` and bump
+/// `version` to defeat the anti-replay check.
 async fn set_megolm_visibility(low: &LockNetLowAgent, chat_id: i64, vis: MegolmRotationVisibility) {
     use locknet_rcab::core::policies::GroupDataState;
     use locknet_rcab::core::crypto::group_data::encrypt_group_data;
@@ -97,6 +145,9 @@ where
     }
 }
 
+// ---- tests ----
+
+/// `AllMembers` fans out to every session regardless of verification status.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_members_reaches_everyone() {
     let alice = common::register_new("mv_all_a").await;
@@ -130,6 +181,8 @@ async fn all_members_reaches_everyone() {
     b.client.disconnect().await.ok();
 }
 
+/// `OnlyVerifiedSessions`: a session-verified recipient (Bob with CS) gets
+/// the key; an unverified one (Charlie without CS) does not.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_verified_sessions_skips_unverified() {
     let alice = common::register_new("mv_ovs_a").await;
@@ -170,7 +223,7 @@ async fn only_verified_sessions_skips_unverified() {
     })
     .await;
     if let HighEvent::NewMessage { message, .. } = evt_b {
-        assert_eq!(message.text.as_deref(), Some("secret"), "Bob должен расшифровать");
+        assert_eq!(message.text.as_deref(), Some("secret"), "Bob must decrypt (session-verified)");
     }
 
     let evt_c = wait_high(&mut charlie_rx, |e| {
@@ -178,7 +231,7 @@ async fn only_verified_sessions_skips_unverified() {
     })
     .await;
     if let HighEvent::NewMessage { message, .. } = evt_c {
-        assert_eq!(message.text, None, "Charlie не должен расшифровать (без CS)");
+        assert_eq!(message.text, None, "Charlie must not decrypt (no CS)");
     }
 
     let mut a = alice;
@@ -189,6 +242,8 @@ async fn only_verified_sessions_skips_unverified() {
     c.client.disconnect().await.ok();
 }
 
+/// `OnlyVerifiedUsers`: Bob has CS (session-verified) but no `USK -> MSK`
+/// signature from Alice, so he is not user-verified and receives no key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_verified_users_skips_untrusted() {
     let alice = common::register_new("mv_ovu_a").await;
@@ -219,7 +274,7 @@ async fn only_verified_users_skips_untrusted() {
     .await;
 
     if let HighEvent::NewMessage { message, .. } = evt {
-        assert_eq!(message.text, None, "Bob не user-verified → не расшифрует");
+        assert_eq!(message.text, None, "Bob is not user-verified, so he cannot decrypt");
     }
 
     let mut a = alice;
@@ -228,6 +283,8 @@ async fn only_verified_users_skips_untrusted() {
     b.client.disconnect().await.ok();
 }
 
+/// `OnlyVerifiedUsers` after Alice uploads a `USK -> MSK` signature for
+/// Bob: Bob becomes user-verified and receives the key.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn only_verified_users_reaches_after_usk_signature() {
     let alice = common::register_new("mv_ovu_usk_a").await;
@@ -262,7 +319,7 @@ async fn only_verified_users_reaches_after_usk_signature() {
     .await;
 
     if let HighEvent::NewMessage { message, .. } = evt {
-        assert_eq!(message.text.as_deref(), Some("after usk"), "Bob теперь user-verified");
+        assert_eq!(message.text.as_deref(), Some("after usk"), "Bob is now user-verified");
     }
 
     let mut a = alice;
@@ -271,6 +328,9 @@ async fn only_verified_users_reaches_after_usk_signature() {
     b.client.disconnect().await.ok();
 }
 
+/// After Bob leaves under `OnlyVerifiedSessions`, the post-leave rotation
+/// does not reach Bob — he can decrypt pre-leave messages but not the
+/// rotated one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rotation_on_membership_respects_policy() {
     let alice = common::register_new("mv_rot_a").await;
@@ -296,7 +356,7 @@ async fn rotation_on_membership_respects_policy() {
     })
     .await;
     if let HighEvent::NewMessage { message, .. } = evt {
-        assert_eq!(message.text.as_deref(), Some("pre-leave"), "Bob может читать");
+        assert_eq!(message.text.as_deref(), Some("pre-leave"), "Bob can read pre-leave messages");
     }
 
     let mut alice_rx = alice_agent.subscribe();
@@ -311,7 +371,7 @@ async fn rotation_on_membership_respects_policy() {
 
     assert!(
         bob_low.store().megolm_inbound(group_id, &s2).await.is_none(),
-        "Bob не должен иметь ключ для post-leave сообщения"
+        "Bob must not have the key for the post-leave message"
     );
 
     let mut a = alice;

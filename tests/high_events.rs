@@ -1,3 +1,38 @@
+//! High-level event translation (`LockNetAgent::subscribe` → `HighEvent`).
+//!
+//! Covers `process_event` in `api/high/agent.rs`: how raw [`Event`] pushes
+//! from the low-level runner are translated into [`HighEvent`] values and
+//! how `ClientState` is updated as a side effect.
+//!
+//! Each test asserts on **both** the delivered event and the cached state
+//! (`agent.cached_message(...)`).
+//!
+//! What is verified:
+//!
+//! - `message_create` → `HighEvent::NewMessage` + `state.messages`.
+//! - `message_update` → `HighEvent::MessageUpdated` + `edited_at` updated.
+//! - `message_delete` → `HighEvent::MessageDeleted` + `deleted = true`,
+//!   `encrypted = None`.
+//! - `reaction_add` / `reaction_remove` → aggregated `Reaction` in
+//!   `state.messages[id]`, including "remove last reaction drops the entry".
+//! - `group_invite_created` → `HighEvent::InviteReceived` + `state.invites`.
+//! - `group_membership_changed` → `HighEvent::GroupMembershipChanged`,
+//!   cached group invalidated.
+//! - Unknown chat (Bob never called `agent.chat()`) still produces
+//!   `HighEvent::NewMessage` with a stub `Chat` (id + name `chat <id>`).
+//!
+//! Requirements:
+//!
+//! - The test must subscribe **before** the server push is triggered.
+//!   `broadcast::Receiver` only sees events sent after `subscribe()`, so
+//!   subscribing after a `send_message` races the runner.
+//! - For tests that send high-level messages, the test uses the low-level
+//!   `messages().send()` to keep the wire payload visible.
+//!
+//! Not covered here: high-level fan-out logic (`tests/high_chat_send.rs`),
+//! `MessageDecrypted` (`tests/high_pending_decrypt.rs`), policies
+//! (`tests/history_visibility.rs`, `tests/megolm_visibility.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -26,6 +61,8 @@ where
     }
 }
 
+/// A `message_create` push from the server produces a `HighEvent::NewMessage`
+/// with a full `Chat` and `Message`, and is cached in `state.messages`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bob_receives_new_message_high_event() {
     let alice = common::register_new("he_new_a").await;
@@ -73,6 +110,8 @@ async fn bob_receives_new_message_high_event() {
     b.client.disconnect().await.ok();
 }
 
+/// An edit produces `HighEvent::MessageUpdated` and the cached message's
+/// `edited_at` is set.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bob_receives_message_updated() {
     let alice = common::register_new("he_upd_a").await;
@@ -82,6 +121,7 @@ async fn bob_receives_message_updated() {
     let bob_agent = bob.client.get_agent().expect("bob agent");
     let group_id = common::setup_group_with_two(&alice, &bob, "HEUpd").await;
 
+    // Subscribe BEFORE the first send so we do not miss NewMessage.
     let mut rx = bob_agent.subscribe();
 
     let ack = alice_low
@@ -129,6 +169,9 @@ async fn bob_receives_message_updated() {
     b.client.disconnect().await.ok();
 }
 
+/// A delete produces `HighEvent::MessageDeleted` and the cached message is
+/// marked `deleted`, its `encrypted` payload cleared, and its `text`
+/// cleared.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bob_receives_message_deleted() {
     let alice = common::register_new("he_del_a").await;
@@ -184,6 +227,8 @@ async fn bob_receives_message_deleted() {
     b.client.disconnect().await.ok();
 }
 
+/// Adding a reaction produces `HighEvent::ReactionAdded` with the reacting
+/// user's `User` populated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alice_receives_reaction_added() {
     let alice = common::register_new("he_radd_a").await;
@@ -231,6 +276,8 @@ async fn alice_receives_reaction_added() {
     b.client.disconnect().await.ok();
 }
 
+/// Reaction aggregation in the state cache: add followed by remove yields an
+/// empty reactions list (no zero-count entry left behind).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bob_state_reaction_added_and_removed() {
     let alice = common::register_new("he_rst_a").await;
@@ -286,7 +333,7 @@ async fn bob_state_reaction_added_and_removed() {
     .await;
 
     let cached = bob_agent.cached_message(ack.message_id).expect("cached");
-    assert!(cached.reactions.is_empty(), "reaction removed полностью");
+    assert!(cached.reactions.is_empty(), "removing the last reaction drops the entry");
 
     let mut a = alice;
     let mut b = bob;
@@ -294,6 +341,8 @@ async fn bob_state_reaction_added_and_removed() {
     b.client.disconnect().await.ok();
 }
 
+/// A `group_invite_created` push produces `HighEvent::InviteReceived` and
+/// populates `state.invites`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn bob_receives_invite_via_high_event() {
     let alice = common::register_new("he_inv_a").await;
@@ -333,6 +382,8 @@ async fn bob_receives_invite_via_high_event() {
     b.client.disconnect().await.ok();
 }
 
+/// `group_membership_changed` produces `HighEvent::GroupMembershipChanged`
+/// with the `Added` / `Left` variants, and the peer `User` resolved.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alice_receives_membership_added_and_left() {
     let alice = common::register_new("he_mc_a").await;
@@ -403,6 +454,12 @@ async fn alice_receives_membership_added_and_left() {
     b.client.disconnect().await.ok();
 }
 
+/// Even for a chat Bob never opened (`agent.chat()` not called),
+/// `HighEvent::NewMessage` fires with a stub `Chat` whose only guaranteed
+/// fields are `id` and `name = "chat <id>"`.
+///
+/// This lets applications show "incoming message from <chat>" without
+/// eagerly fetching every group upfront.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn high_event_fires_for_uncached_chat() {
     let alice = common::register_new("he_unc_a").await;
@@ -414,7 +471,7 @@ async fn high_event_fires_for_uncached_chat() {
 
     assert!(
         bob_agent.cached_chats().is_empty(),
-        "Bob не вызывал agent.chat() — кэш должен быть пуст"
+        "Bob never called agent.chat(), so the cache must be empty"
     );
 
     let mut bob_rx = bob_agent.subscribe();

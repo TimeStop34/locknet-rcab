@@ -1,7 +1,35 @@
+//! Olm (1-to-1) encryption tests.
+//!
+//! Covers the low-level Olm protocol over the real server and the real
+//! `vodozemac` implementation (no mocking):
+//!
+//! - Sending a pre-key message from Alice to Bob and decrypting it.
+//! - Establishing a bidirectional session (Bob must reply before Alice can
+//!   send a normal, non-pre-key message).
+//! - Olm message-type semantics: the first message in a session is always
+//!   type=0 (pre-key), the second and subsequent messages are type=1
+//!   (normal).
+//! - Error paths: decrypting a normal message without an established session
+//!   returns `Ok(None)`; decrypting with the wrong algorithm returns
+//!   [`locknet_rcab::LockNetError::InvalidResponse`].
+//!
+//! Not covered here (see other files):
+//! - Olm session persistence across process restarts — `tests/sqlite_e2e.rs`.
+//! - Olm inside SAS / QR flows — `tests/sas.rs`, `tests/qr.rs`.
+//! - Olm as the transport for `group_key` and `key_request` —
+//!   `tests/megolm.rs`, `tests/key_sharing.rs`.
+
 mod common;
 
 use locknet_rcab::Event;
 
+/// Alice sends an Olm message; Bob decrypts it.
+///
+/// Verifies that:
+/// - the server rewrites `sender_session_id` to Alice's authenticated
+///   session (clients do not control this field);
+/// - the algorithm name is exactly `ln.encryption.olm.v1`;
+/// - the plaintext round-trips byte-for-byte.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_send_and_receive() {
     let alice = common::register_new("olm_sr_a").await;
@@ -42,6 +70,11 @@ async fn olm_send_and_receive() {
     b.client.disconnect().await.ok();
 }
 
+/// Bidirectional Olm: Alice → Bob, then Bob → Alice over the same session.
+///
+/// Verifies that the session established by Alice's pre-key message is
+/// reusable in the reverse direction: Bob can encrypt a reply that Alice
+/// decrypts.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_bidirectional() {
     let alice = common::register_new("olm_bid_a").await;
@@ -87,6 +120,13 @@ async fn olm_bidirectional() {
     b.client.disconnect().await.ok();
 }
 
+/// The first Olm message in a session is a pre-key (type=0). After Bob
+/// replies, subsequent messages from Alice become normal (type=1).
+///
+/// This is the fundamental Olm handshake behavior: a session is only "fully
+/// established" after both directions have been used at least once. Higher
+/// layers rely on this: sending a burst of messages before any reply uses a
+/// pre-key for each one, which is expensive and server-visible.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_second_message_is_normal_type() {
     let alice = common::register_new("olm_t2_a").await;
@@ -102,6 +142,7 @@ async fn olm_second_message_is_normal_type() {
     let mut alice_rx = alice_low.subscribe();
     let mut bob_rx = bob_low.subscribe();
 
+    // Step 1: Alice → Bob, "first" (pre-key, type=0).
     alice_low
         .olm()
         .send(bob_uid, bob_sid, "first")
@@ -118,11 +159,15 @@ async fn olm_second_message_is_normal_type() {
         a.curve25519_public_b64()
     };
     let inner1 = p1.ciphertext.get(&bob_curve).expect("ciphertext for bob");
-    assert_eq!(inner1.ciphertext_type, 0, "first message must be prekey (type=0)");
+    assert_eq!(
+        inner1.ciphertext_type, 0,
+        "first message must be a pre-key (type=0)"
+    );
 
     let pt1 = bob_low.olm().decrypt(p1).wait().await.expect("decrypt #1").unwrap();
     assert_eq!(pt1, "first");
 
+    // Step 2: Bob → Alice, "ack" — establishes the session on both sides.
     bob_low
         .olm()
         .send(alice_uid, alice_sid, "ack")
@@ -135,6 +180,7 @@ async fn olm_second_message_is_normal_type() {
     let pta = alice_low.olm().decrypt(pa).wait().await.expect("decrypt ack").unwrap();
     assert_eq!(pta, "ack");
 
+    // Step 3: Alice → Bob, "second" — must be type=1 (normal) now.
     alice_low
         .olm()
         .send(bob_uid, bob_sid, "second")
@@ -160,6 +206,13 @@ async fn olm_second_message_is_normal_type() {
     b.client.disconnect().await.ok();
 }
 
+/// Decrypting a type=1 (normal) message without any established session
+/// returns `Ok(None)` rather than an error.
+///
+/// This contract lets callers distinguish "no session yet, the message is
+/// lost" (which they should surface to the UI as undecryptable) from
+/// "decryption failed because the message is corrupt" (which is a protocol
+/// error).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_decrypt_returns_none_without_session() {
     let alice = common::register_new("olm_none_a").await;
@@ -193,7 +246,10 @@ async fn olm_decrypt_returns_none_without_session() {
     };
 
     let result = bob_low.olm().decrypt(payload).wait().await;
-    assert!(matches!(result, Ok(None)), "expected Ok(None), got {result:?}");
+    assert!(
+        matches!(result, Ok(None)),
+        "type=1 without a session must yield Ok(None), got {result:?}"
+    );
 
     let mut a = alice;
     let mut b = bob;
@@ -201,6 +257,12 @@ async fn olm_decrypt_returns_none_without_session() {
     b.client.disconnect().await.ok();
 }
 
+/// Decrypting with the wrong algorithm returns
+/// [`locknet_rcab::LockNetError::InvalidResponse`].
+///
+/// This guards against protocol confusion: a non-Olm payload (for example a
+/// Megolm message routed by mistake) must not be fed to the Olm decryptor
+/// silently — the error surfaces the mismatch.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_decrypt_wrong_algorithm_fails() {
     let bob = common::register_new("olm_alg_b").await;

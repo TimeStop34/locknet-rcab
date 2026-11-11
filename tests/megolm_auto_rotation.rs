@@ -1,3 +1,31 @@
+//! Megolm outbound auto-rotation.
+//!
+//! Rotation is driven by two thresholds, both configured on
+//! [`locknet_rcab::LockNetConfig`]:
+//!
+//! - `megolm_rotation_message_count` — rotate after N messages (`0` disables).
+//! - `megolm_rotation_ttl_secs` — rotate after N seconds since session
+//!   creation (`0` disables).
+//!
+//! The thresholds are checked in
+//! [`locknet_rcab::api::low::helpers::megolm::LockNetMegolmHelper::ensure_session`],
+//! which returns `(MegolmSessionInfo, rotated: bool)`. A rotation increments
+//! `GroupData.version` and generates a fresh `group_data_key` (so the new
+//! policy blob is not readable by holders of the old one). The high layer
+//! (`Chat::send`) is responsible for fanning out the new key after a
+//! rotation; this file tests the low layer's rotation contract and the
+//! high layer's fan-out via one integration test.
+//!
+//! Requirements:
+//!
+//! - `setup_olm()` is not strictly necessary for the pure-count/TTL tests
+//!   (no messages are actually delivered), but the `fanout_after_auto_rotation`
+//!   test needs a live Olm session between the two peers.
+//!
+//! Not covered here: rotation triggered by membership changes
+//! (`tests/high_chat_send.rs`), persistence of the counter across restarts
+//! (`tests/sqlite_e2e.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -13,6 +41,10 @@ fn cfg_with_rotation(count: u64, ttl_secs: u64) -> LockNetConfig {
     cfg
 }
 
+/// A user under test with an explicit rotation policy. Kept as a local
+/// struct (rather than `common::TestUser`) because `TestUser` always builds
+/// its client from `common::test_config()`, and these tests need a config
+/// with non-default rotation thresholds.
 struct RotUser {
     client: LockNetClient,
     session: LockNetSessionContext,
@@ -65,7 +97,12 @@ async fn accept_own_invite(bob: &RotUser, group_id: i64) {
         .expect("accept");
 }
 
+// ---- tests ----
 
+/// Rotation by message count: with `count = 3`, the first three
+/// `ensure_session` calls return `rotated = false` and the same
+/// `session_id`; the fourth returns `rotated = true` and a different
+/// `session_id`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rotation_by_message_count() {
     let alice = register_with_rotation("rot_cnt_a", 3, 0).await;
@@ -87,14 +124,17 @@ async fn rotation_by_message_count() {
         let enc = alice_low.megolm().encrypt(group_id, &format!("m{i}")).await.expect("encrypt");
         enc_ids.push(enc.megolm_session_id.clone());
     }
-    assert!(enc_ids.iter().all(|id| id == &s1), "all 3 in S1");
+    assert!(enc_ids.iter().all(|id| id == &s1), "all 3 messages in session S1");
 
     let (info_new, rotated) = alice_low.megolm().ensure_session(group_id).await.expect("ensure #4");
-    assert!(rotated, "rotation must trigger on 4th ensure");
+    assert!(rotated, "rotation must trigger on the 4th ensure");
     assert_ne!(info_new.megolm_session_id, s1, "new session_id after rotation");
 
     let enc4 = alice_low.megolm().encrypt(group_id, "m3").await.expect("encrypt 4");
-    assert_eq!(enc4.megolm_session_id, info_new.megolm_session_id, "4th in new session");
+    assert_eq!(
+        enc4.megolm_session_id, info_new.megolm_session_id,
+        "the 4th message goes into the new session"
+    );
 
     let mut a = alice;
     let mut b = bob;
@@ -102,6 +142,8 @@ async fn rotation_by_message_count() {
     b.client.disconnect().await.ok();
 }
 
+/// Rotation by TTL: with `ttl = 1s`, an immediate `ensure_session` returns
+/// `rotated = false`; after sleeping 1.2s, it returns `rotated = true`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rotation_by_ttl() {
     let alice = register_with_rotation("rot_ttl_a", 0, 1).await;
@@ -121,7 +163,7 @@ async fn rotation_by_ttl() {
     tokio::time::sleep(Duration::from_millis(1200)).await;
 
     let (info_after, rotated_after) = alice_low.megolm().ensure_session(group_id).await.expect("ensure after");
-    assert!(rotated_after, "rotation after ttl");
+    assert!(rotated_after, "rotation after TTL");
     assert_ne!(info_after.megolm_session_id, s1);
 
     let mut a = alice;
@@ -130,6 +172,8 @@ async fn rotation_by_ttl() {
     b.client.disconnect().await.ok();
 }
 
+/// With both thresholds disabled (`count = 0`, `ttl = 0`), no rotation ever
+/// happens regardless of the number of messages or elapsed time.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn no_rotation_when_disabled() {
     let alice = register_with_rotation("rot_off_a", 0, 0).await;
@@ -151,7 +195,7 @@ async fn no_rotation_when_disabled() {
 
     tokio::time::sleep(Duration::from_millis(300)).await;
     let (info_final, rotated_final) = alice_low.megolm().ensure_session(group_id).await.expect("ensure final");
-    assert!(!rotated_final, "no rotation even after time when ttl=0");
+    assert!(!rotated_final, "no rotation even after time when TTL = 0");
     assert_eq!(info_final.megolm_session_id, s1);
 
     let mut a = alice;
@@ -160,6 +204,9 @@ async fn no_rotation_when_disabled() {
     b.client.disconnect().await.ok();
 }
 
+/// After a count-triggered rotation, the high layer (`Chat::send`) fans out
+/// the new key to the other member. Verifies that the peer can decrypt
+/// post-rotation messages without an explicit `key_request`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn fanout_after_auto_rotation() {
     let alice = register_with_rotation("rot_fo_a", 2, 0).await;
@@ -189,7 +236,7 @@ async fn fanout_after_auto_rotation() {
 
     let m2 = alice_chat.send("m2").await.expect("m2");
     let s2 = m2.encrypted_payload.as_ref().unwrap().megolm_session_id.clone();
-    assert_eq!(s1, s2, "msg2 in same session");
+    assert_eq!(s1, s2, "m2 is still in session S1");
 
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -206,7 +253,7 @@ async fn fanout_after_auto_rotation() {
 
     let m3 = alice_chat.send("m3").await.expect("m3");
     let s3 = m3.encrypted_payload.as_ref().unwrap().megolm_session_id.clone();
-    assert_ne!(s3, s1, "3rd message must rotate");
+    assert_ne!(s3, s1, "the 3rd message must trigger rotation");
 
     tokio::time::sleep(Duration::from_millis(500)).await;
     let history_after = bob_chat.messages(None, 20).await.expect("msgs after");
@@ -214,7 +261,7 @@ async fn fanout_after_auto_rotation() {
     assert_eq!(
         m3_after.text.as_deref(),
         Some("m3"),
-        "bob decrypts msg from rotated session after fan-out"
+        "bob decrypts the message from the rotated session after fan-out"
     );
 
     let mut a = alice;

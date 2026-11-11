@@ -1,3 +1,49 @@
+//! QR verification — low-level API.
+//!
+//! Covers `LockNetLowAgent::verification().qr_*()` (low-level QR flows that
+//! operate on `Event::ToDevice`). For the higher-level flow via
+//! `SecurityHelper` and `HighEvent`, see `tests/high_qr.rs`.
+//!
+//! LockNet's QR format (unlike Matrix):
+//!
+//! ```text
+//! LockNetProtocol;v1.0;<mode>;<txid>;<eph_pub_b64>;<secret_b64>
+//! ```
+//!
+//! Modes:
+//!
+//! - **0** — user-to-user. Both sides MAC their MSKs (`master`).
+//! - **1** — self-device with the MSK already trusted. Both sides MAC
+//!   their per-device `ed25519` keys.
+//! - **2** — self-device with the MSK not yet trusted. Cryptographically
+//!   identical to mode 1; the difference is semantic (whether the MSK is
+//!   marked as verified after the flow).
+//!
+//! The handshake:
+//!
+//! 1. Displayer generates an ephemeral X25519 keypair and an 8-byte secret,
+//!    both encoded in the QR string.
+//! 2. Scanner decodes the QR, generates its own X25519 ephemeral, computes
+//!    the ECDH shared secret, and sends `qr.scanned` (with the secret and its
+//!    public key) via Olm.
+//! 3. Displayer verifies the secret matches, computes the same ECDH shared
+//!    secret, and sends `qr.confirm`.
+//! 4. Both sides derive a MAC key from the shared secret via HKDF (info =
+//!    `LOCKNET_ENCRYPTION_QR_VERIFICATION_V1`), then exchange `qr.mac` of
+//!    their respective keys (MSK in mode 0, `ed25519` in modes 1/2).
+//! 5. Each side recomputes the peer's expected MAC from the peer's published
+//!    key and compares.
+//!
+//! Requirements:
+//!
+//! - `setup_full()` for each participant (cross-signing + device signature);
+//!   mode 0 needs both peers' MSKs to be queryable, modes 1/2 need both
+//!   peers' `ed25519` keys.
+//! - `setup_olm()` — QR messages are carried inside Olm.
+//!
+//! Not covered here: high-level QR via `SecurityHelper` (`tests/high_qr.rs`),
+//! SAS (`tests/sas.rs`, `tests/high_sas.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -8,6 +54,8 @@ use locknet_rcab::api::low::helpers::verification::{QrMode, QrStep};
 use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{Credentials, Event, LockNetClient, LockNetLowAgent};
+
+// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -113,7 +161,15 @@ fn b64_no_pad(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD_NO_PAD.encode(bytes)
 }
 
+// ---- tests ----
 
+/// Mode 0 (user-to-user) full flow.
+///
+/// Verifies:
+/// - QR string prefix is `LockNetProtocol;v1.0;0;`;
+/// - both sides produce the same MAC key (identical ECDH shared secret);
+/// - both sides' MACs verify (mode 0 MACs the MSK);
+/// - both flows end in `QrStep::Verified`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode0_user_to_user_full_flow() {
     let alice = common::register_new("qr0_a").await;
@@ -177,7 +233,7 @@ async fn qr_mode0_user_to_user_full_flow() {
 
     let alice_mk = alice_flow.mac_key().copied().expect("alice mac_key");
     let bob_mk = bob_flow.mac_key().copied().expect("bob mac_key");
-    assert_eq!(alice_mk, bob_mk, "mac_key должен совпасть");
+    assert_eq!(alice_mk, bob_mk, "both sides must derive the same MAC key");
 
     let (alice_res, bob_res) = tokio::time::timeout(
         Duration::from_secs(10),
@@ -202,6 +258,14 @@ async fn qr_mode0_user_to_user_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// Mode 1 (self-device with trusted MSK) full flow.
+///
+/// Uses two sessions of the same user (via a second login). MACs the
+/// `ed25519` key of each session rather than the shared MSK — which is why
+/// the two sessions must have different `ed25519` keys.
+///
+/// Verifies the same invariants as mode 0, plus the prefix
+/// `LockNetProtocol;v1.0;1;`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode1_self_device_full_flow() {
     let alice = common::register_new("qr1_a").await;
@@ -227,7 +291,10 @@ async fn qr_mode1_self_device_full_flow() {
 
     let alice1_ed = own_ed25519(&alice1_low).await;
     let alice2_ed = own_ed25519(&alice2_low).await;
-    assert_ne!(alice1_ed, alice2_ed, "у разных сессий должны быть разные ed25519");
+    assert_ne!(
+        alice1_ed, alice2_ed,
+        "two sessions of the same user must have different ed25519 keys"
+    );
 
     let (code, mut disp_flow) = alice1_low
         .verification()
@@ -289,6 +356,11 @@ async fn qr_mode1_self_device_full_flow() {
     a.client.disconnect().await.ok();
 }
 
+/// Mode 2 (self-device with untrusted MSK) full flow.
+///
+/// Cryptographically identical to mode 1 (MACs `ed25519`), but the QR prefix
+/// is `LockNetProtocol;v1.0;2;` and the semantics at the application level
+/// differ (whether the MSK is marked as trusted after the flow).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mode2_self_device_full_flow() {
     let alice = common::register_new("qr2_a").await;
@@ -369,6 +441,12 @@ async fn qr_mode2_self_device_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// A `qr.scanned` message with the wrong `secret` cancels the flow with
+/// `QrStep::Cancelled("secret mismatch")`.
+///
+/// The 8-byte secret proves the scanner actually scanned the displayed QR
+/// (rather than guessing the txid). Bob is forged here to simulate a scanner
+/// that tried to short-circuit the challenge.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_secret_mismatch_cancels() {
     let alice = common::register_new("qrss_a").await;
@@ -399,6 +477,7 @@ async fn qr_secret_mismatch_cancels() {
 
     let txid = parse_qr_txid(&code.raw);
 
+    // Craft a fake scanned message with the wrong secret.
     let mut sk = [0u8; 32];
     getrandom::getrandom(&mut sk).expect("getrandom");
     let eph_sk = x25519_dalek::StaticSecret::from(sk);
@@ -430,6 +509,7 @@ async fn qr_secret_mismatch_cancels() {
         other => panic!("expected Cancelled(secret mismatch), got {other:?}"),
     }
 
+    // Cancelled is sticky: subsequent `next()` calls return the same state.
     let step2 = alice_flow.next().await.expect("alice next #2");
     assert!(matches!(step2, QrStep::Cancelled(_)));
 
@@ -439,6 +519,12 @@ async fn qr_secret_mismatch_cancels() {
     b.client.disconnect().await.ok();
 }
 
+/// If the initiator recomputes the peer's MAC against the wrong key (here
+/// Alice passes her own MSK instead of Bob's), the initiator's flow cancels
+/// with `QrStep::Cancelled("MAC mismatch")` while the responder — whose peer
+/// keys are correct — still verifies.
+///
+/// This asymmetry is what catches a MITM on the initiator's side.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_mac_mismatch_cancels() {
     let alice = common::register_new("qrmm_a").await;
@@ -489,6 +575,7 @@ async fn qr_mac_mismatch_cancels() {
     .await
     .expect("next join timeout");
 
+    // Alice passes her OWN msk as the expected peer key.
     let real_a_msk = peer_msk(&bob_low, alice_uid).await;
     let (alice_res, bob_res) = tokio::time::timeout(
         Duration::from_secs(10),
@@ -517,6 +604,9 @@ async fn qr_mac_mismatch_cancels() {
     b.client.disconnect().await.ok();
 }
 
+/// Malformed QR strings are rejected with `LockNetError::InvalidArgument`.
+///
+/// Three cases: garbage input, wrong prefix, and an invalid mode value.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_invalid_raw_fails() {
     let alice = common::register_new("qrbad_a").await;
@@ -530,7 +620,7 @@ async fn qr_invalid_raw_fails() {
         .qr_scan("not-a-qr", 1, 1, a_msk.clone(), a_ed.clone())
         .await;
     match r1 {
-        Ok(_) => panic!("qr_scan с мусором не должен возвращать Ok"),
+        Ok(_) => panic!("qr_scan with garbage must not return Ok"),
         Err(locknet_rcab::LockNetError::InvalidArgument(_)) => {}
         Err(other) => panic!("expected InvalidArgument, got {other:?}"),
     }
@@ -546,7 +636,7 @@ async fn qr_invalid_raw_fails() {
         )
         .await;
     match r2 {
-        Ok(_) => panic!("qr_scan с неверным префиксом не должен возвращать Ok"),
+        Ok(_) => panic!("qr_scan with wrong prefix must not return Ok"),
         Err(locknet_rcab::LockNetError::InvalidArgument(_)) => {}
         Err(other) => panic!("expected InvalidArgument, got {other:?}"),
     }
@@ -562,7 +652,7 @@ async fn qr_invalid_raw_fails() {
         )
         .await;
     match r3 {
-        Ok(_) => panic!("qr_scan с неверным mode не должен возвращать Ok"),
+        Ok(_) => panic!("qr_scan with invalid mode must not return Ok"),
         Err(locknet_rcab::LockNetError::InvalidArgument(_)) => {}
         Err(other) => panic!("expected InvalidArgument, got {other:?}"),
     }
@@ -571,6 +661,8 @@ async fn qr_invalid_raw_fails() {
     a.client.disconnect().await.ok();
 }
 
+/// `cancel()` from the `WaitingScanned` state transitions the flow to
+/// `QrStep::Cancelled("cancelled by user")` without any message exchange.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn qr_cancel_from_waiting_scanned() {
     let alice = common::register_new("qrcc_a").await;

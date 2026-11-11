@@ -1,3 +1,45 @@
+//! `Chat::send` — high-level fan-out and rotation semantics.
+//!
+//! `Chat::send` on an **encrypted** chat does more than the low-level
+//! `messages().send()`:
+//!
+//! 1. `megolm().ensure_session()` — reuses the existing Megolm session or
+//!    creates one (rotating if a rotation threshold was crossed).
+//! 2. Fan-out the group key (`ln.encryption.group_key`) to every active
+//!    session of every group member except the sender's current session.
+//! 3. Encrypt the plaintext and send it.
+//!
+//! On a **public** chat, `Chat::send` uses `ln.plaintext.v1`: the
+//! ciphertext is `base64(plaintext)` and the server stores it as is.
+//!
+//! Rotation on membership change: when a member joins or leaves,
+//! `process_event` rotates the Megolm session **before** emitting
+//! `GroupMembershipChanged`. The new key is fanned out only to the new
+//! membership, so a user who just left never receives the post-leave
+//! session.
+//!
+//! What is verified:
+//!
+//! - Alice `Chat::send` → Bob decrypts via `HighEvent::NewMessage` and via
+//!   history.
+//! - Fan-out reaches every session of every member (Alice + Bob + Charlie).
+//! - After Bob leaves, the Megolm session rotates; Bob keeps the old session
+//!   (so old messages remain decryptable for him) but never gets the new
+//!   one.
+//! - Public groups use plaintext: `encrypted == false`, text matches the
+//!   plaintext, and `process_event` skips decryption.
+//!
+//! Requirements:
+//!
+//! - A group via `setup_group_with_two` (or `create_group` when three
+//!   members are needed).
+//! - No `setup_olm` needed — fan-out uses `share_group_key` which creates
+//!   the Olm session on the fly.
+//!
+//! Not covered here: auto-rotation by TTL / message count
+//! (`tests/megolm_auto_rotation.rs`), fan-out policy filters
+//! (`tests/megolm_visibility.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -25,6 +67,12 @@ where
     }
 }
 
+/// Alice sends a private message via `Chat::send`; Bob receives a
+/// decrypted `HighEvent::NewMessage` and sees the message in history.
+///
+/// Verifies that `Chat::send` performs the whole pipeline (ensure session,
+/// fan-out, encrypt, send) without exposing the low-level details to the
+/// caller.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alice_sends_bob_decrypts_via_high() {
     let alice = common::register_new("hs_ab_a").await;
@@ -68,6 +116,11 @@ async fn alice_sends_bob_decrypts_via_high() {
     b.client.disconnect().await.ok();
 }
 
+/// Fan-out reaches every session of every member.
+///
+/// Three members (Alice, Bob, Charlie) in one group; the initial fan-out
+/// must deliver the group key to Bob and Charlie, and both must decrypt the
+/// same message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alice_sends_to_three_participants() {
     let alice = common::register_new("hs3_a").await;
@@ -128,6 +181,17 @@ async fn alice_sends_to_three_participants() {
     c.client.disconnect().await.ok();
 }
 
+/// After a member leaves, the Megolm session rotates.
+///
+/// Verifies:
+/// - S1 (pre-leave) and S2 (post-leave) have different `session_id`s;
+/// - Bob still has S1 and can decrypt the pre-leave message;
+/// - Bob does not have S2, so the post-leave message does not decrypt;
+/// - Alice (who has both inbound sessions) decrypts everything.
+///
+/// Uses the low-level `bob_low.store().megolm_inbound(...)` to inspect the
+/// session store directly — the API-level `bob_chat.messages()` would refuse
+/// to query because Bob is no longer a member.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn membership_change_rotates_megolm() {
     let alice = common::register_new("hs_rot_a").await;
@@ -162,7 +226,7 @@ async fn membership_change_rotates_megolm() {
     assert_eq!(pt1, "msg1 pre-bob-leave");
     assert!(
         bob_low.store().megolm_inbound(group_id, &s1).await.is_some(),
-        "у Bob должен быть S1"
+        "Bob must have S1"
     );
 
     let mut alice_rx = alice_agent.subscribe();
@@ -184,15 +248,15 @@ async fn membership_change_rotates_megolm() {
     let second_enc = second.encrypted_payload.clone().expect("second enc");
     let s2 = second_enc.megolm_session_id.clone();
 
-    assert_ne!(s1, s2, "megolm должна ротироваться после leave");
+    assert_ne!(s1, s2, "Megolm must rotate after leave");
 
     assert!(
         bob_low.store().megolm_inbound(group_id, &s2).await.is_none(),
-        "у Bob НЕ должно быть S2"
+        "Bob must NOT have S2"
     );
     assert!(
         bob_low.store().megolm_inbound(group_id, &s1).await.is_some(),
-        "у Bob должен остаться S1"
+        "Bob must still have S1"
     );
 
     let pt2 = bob_low
@@ -200,7 +264,7 @@ async fn membership_change_rotates_megolm() {
         .decrypt(group_id, &second_enc)
         .await
         .unwrap();
-    assert!(pt2.is_none(), "Bob не должен расшифровать msg2");
+    assert!(pt2.is_none(), "Bob must not decrypt msg2");
 
     let pt1_again = bob_low
         .megolm()
@@ -226,6 +290,9 @@ async fn membership_change_rotates_megolm() {
     b.client.disconnect().await.ok();
 }
 
+/// Public groups use plaintext: `encrypted == false` in the returned
+/// `Message`, and the receiving side sees the text without any Megolm
+/// involvement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn public_group_uses_plaintext() {
     let alice = common::register_new("hs_pub_a").await;

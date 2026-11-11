@@ -1,3 +1,37 @@
+//! SAS via the high-level API.
+//!
+//! Covers `SecurityHelper::sas_*()` (the high-level flow built on top of
+//! `LockNetLowAgent::verification().sas_*()`). Differences from the
+//! low-level `tests/sas.rs`:
+//!
+//! - The flow is stored in `state.active_sas` keyed by `transaction_id`,
+//!   and initiated/responded through `security().sas_start` /
+//!   `security().sas_accept`.
+//! - Incoming `ln.encryption.key.verification.start` is **not** auto-accepted;
+//!   it lands in `state.pending_sas_starts`. The UI must call `sas_accept` or
+//!   `sas_decline`. This gate gives the user a chance to refuse before any
+//!   cryptographic work.
+//! - `sas_next` writes to `state.verified_users` / `verified_sessions` on
+//!   `Verified` and emits `HighEvent::SessionVerified` /
+//!   `HighEvent::UserVerified`.
+//! - `emoji_confirm(txid, true)` resolves peer keys (`ed25519` and `msk`)
+//!   from `query_keys` / `query_cross_signing_keys` automatically; the caller
+//!   does not need to call `set_peer_keys`.
+//!
+//! What is verified:
+//!
+//! - Full flow (`sas_via_high_full_flow`): START via HighEvent, accept,
+//!   emoji agreement, MAC verification, both sides verified, and
+//!   `is_user_verified` / `is_session_verified` return true.
+//! - `sas_decline` removes the pending start; a subsequent `sas_next`
+//!   returns `InvalidArgument`.
+//! - `sas_cancel` removes the active flow; a subsequent `sas_next` returns
+//!   `InvalidArgument`.
+//!
+//! Not covered here: low-level flow (`tests/sas.rs`), QR
+//! (`tests/high_qr.rs`), cross-signing itself
+//! (`tests/cross_signing.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -33,6 +67,18 @@ where
     }
 }
 
+/// Full SAS flow through `SecurityHelper`.
+///
+/// Verifies:
+/// - the initiator's START surfaces at the responder as
+///   `HighEvent::SasMessage { type: start }` with matching `transaction_id`;
+/// - `sas_accept` consumes the pending start and creates a responder flow;
+/// - `sas_next` on both sides yields the same 7-emoji sequence;
+/// - `emoji_confirm(true)` on both sides resolves peer keys automatically
+///   and completes with `SasStep::Verified`;
+/// - both peers are added to `state.verified_users` /
+///   `state.verified_sessions`, visible via `is_user_verified` /
+///   `is_session_verified`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_via_high_full_flow() {
     let alice = common::register_new("hsas_a").await;
@@ -71,7 +117,7 @@ async fn sas_via_high_full_flow() {
         }
         _ => unreachable!(),
     };
-    assert_eq!(alice_txid, bob_txid, "txid должен совпадать");
+    assert_eq!(alice_txid, bob_txid, "transaction_id must match on both sides");
 
     bob_agent
         .security()
@@ -146,11 +192,11 @@ async fn sas_via_high_full_flow() {
 
     assert!(
         alice_agent.security().is_session_verified(bob_uid, bob_sid).await,
-        "alice: bob session verified"
+        "alice: bob session is verified"
     );
     assert!(
         bob_agent.security().is_session_verified(alice_uid, alice_sid).await,
-        "bob: alice session verified"
+        "bob: alice session is verified"
     );
     assert!(alice_agent.security().is_user_verified(bob_uid).await);
     assert!(bob_agent.security().is_user_verified(alice_uid).await);
@@ -161,6 +207,8 @@ async fn sas_via_high_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// `sas_decline` removes the pending START. A subsequent `sas_next` on the
+/// same txid returns `InvalidArgument` (flow does not exist).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_decline_leaves_no_flow() {
     let alice = common::register_new("hsasd_a").await;
@@ -215,6 +263,8 @@ async fn sas_decline_leaves_no_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// `sas_cancel` removes an active flow; a subsequent `sas_next` on the same
+/// txid returns `InvalidArgument`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_cancel_works_before_confirm() {
     let alice = common::register_new("hsasc_a").await;

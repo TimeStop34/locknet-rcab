@@ -1,9 +1,39 @@
+//! Event sync and offline queue tests.
+//!
+//! Covers the `event_sync` WebSocket method and the `sync_until_empty`
+//! convenience helper. These tests verify that:
+//!
+//! - Events generated while a device is offline are queued server-side.
+//! - Reconnecting via [`locknet_rcab::Credentials::Session`] preserves the
+//!   `session_id` and allows draining the queue.
+//! - Draining happens in batches (`more` flag) and stops when the queue is
+//!   empty.
+//! - `message_create` and `group_invite_created` events are delivered with
+//!   their original payloads intact.
+//!
+//! The batch size is controlled by the server (`event_sync_limit`); the
+//! client's `sync_until_empty(max_iterations)` simply loops until `more` is
+//! `false` or the iteration cap is reached.
+//!
+//! Not covered here: `HighEvent` translation (see `tests/high_events.rs`),
+//! event ordering guarantees, or drop behavior on queue overflow.
+
 mod common;
 
 use std::time::Duration;
 
 use locknet_rcab::{Credentials, Event, LockNetClient};
 
+/// Bob goes offline; Alice creates three groups; Bob reconnects.
+///
+/// Verifies that:
+/// - reconnecting via `Credentials::Session` preserves `session_id` (so the
+///   queued events, keyed by session, are still addressable);
+/// - `event_sync` drains the events in batches and reports `more = false`
+///   when the queue is empty;
+/// - the three `group_invite_created` pushes arrive with their original
+///   `group_id`s;
+/// - a second `event_sync` drains nothing.
 #[tokio::test]
 async fn events_offline_drain_and_reconnect() {
     let alice = common::register_new("ev_drain_a").await;
@@ -42,7 +72,7 @@ async fn events_offline_drain_and_reconnect() {
 
     let ack = bob2_low.events().sync().await.expect("sync");
     assert!(ack.sent >= 3, "expected >=3 events, got {}", ack.sent);
-    assert!(!ack.more, "3 events < 200 → more должен быть false");
+    assert!(!ack.more, "3 events < 200, so `more` must be false");
 
     let mut invite_count = 0;
     for _ in 0..60 {
@@ -80,6 +110,11 @@ async fn events_offline_drain_and_reconnect() {
     alice.client.disconnect().await.ok();
 }
 
+/// Verifies that [`locknet_rcab::api::low::helpers::events::LockNetEventsHelper::sync_until_empty`]
+/// drains the queue correctly across multiple batches and reports the total
+/// number of delivered events.
+///
+/// Two groups → `total >= 2` on the first call, `0` on the second.
 #[tokio::test]
 async fn events_sync_until_empty_helper() {
     let alice = common::register_new("ev_sue_a").await;
@@ -121,13 +156,16 @@ async fn events_sync_until_empty_helper() {
         .sync_until_empty(10)
         .await
         .expect("sync2");
-    assert_eq!(total2, 0, "second sync_until_empty must be empty");
+    assert_eq!(total2, 0, "a second sync_until_empty must return 0");
 
     bob2.disconnect().await.ok();
     let mut alice = alice;
     alice.client.disconnect().await.ok();
 }
 
+/// Bob is offline while Alice sends two messages. Upon reconnection, the
+/// queued `message_create` events are drained, and the messages appear in
+/// `get_messages` (the queue and the history are consistent).
 #[tokio::test]
 async fn events_message_queue_offline() {
     let alice = common::register_new("ev_msg_a").await;

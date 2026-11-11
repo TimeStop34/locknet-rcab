@@ -1,3 +1,45 @@
+//! High-level `Chat::request_missing_keys` and the auto-responder.
+//!
+//! Two sides cooperate:
+//!
+//! **Requester** (`Chat::request_missing_keys`):
+//! 1. Collects pending ids from `state.pending_decrypt`.
+//! 2. Queries the sessions of `our_user` (other devices) first, then the
+//!    group creator's sessions.
+//! 3. Sends `ln.encryption.key_request` with `have` set to the
+//!    already-known Megolm sessions.
+//! 4. Waits for `HighEvent::KeyRequest{Imported,Done,Denied}` — the raw
+//!    `to_device` handling stays inside `process_event`, so there is exactly
+//!    one Olm decryptor on the wire.
+//!
+//! **Responder** (`respond_key_request` in `agent.rs`):
+//! 1. Resolves the requester's `user_id` from `sender_session`.
+//! 2. Checks trust: only `is_user_verified(uid) AND
+//!    is_session_verified(uid, sid)` sessions are allowed (see
+//!    `tests/trust_graph.rs` for WoT semantics).
+//! 3. Applies each chat's `HistoryVisibility` policy.
+//! 4. Sends the matching Megolm keys (`ln.encryption.group_key`) plus
+//!    `ln.encryption.key_request_done`.
+//!
+//! What is verified:
+//!
+//! - Bob2 (second device of Bob, self-signed by Bob1's SSK) recovers history
+//!   from Bob1 (`tests/high_key_request::new_device_recovers_history_from_sibling_device`).
+//! - No pending ids → noop (`request_missing_keys_no_pending_is_noop`).
+//! - A member who has never been verified is denied
+//!   (`untrusted_member_is_denied`).
+//!
+//! Requirements:
+//!
+//! - Both sides must have cross-signing set up (`setup_cross_signing`).
+//! - For `new_device_recovers_history_from_sibling_device`, Bob1 must sign
+//!   Bob2's `ed25519` with Bob1's SSK — without that, Bob2 is
+//!   `session_verified = false` and the responder denies.
+//!
+//! Not covered here: policy enforcement (`tests/history_visibility.rs`),
+//! transitive trust (`tests/trust_graph.rs`), low-level
+//! `key_sharing().request()` (`tests/key_sharing.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -7,7 +49,6 @@ use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{Credentials, HighEvent, LockNetClient, LockNetLowAgent};
 use tokio::sync::broadcast;
-
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -108,7 +149,25 @@ where
     }
 }
 
-
+/// Bob2 (second device of Bob) recovers history from Bob1 via
+/// `Chat::request_missing_keys`.
+///
+/// Flow:
+/// 1. Bob1 sets up cross-signing and signs its own device.
+/// 2. Alice creates a group with Bob (invite → accept on Bob1) and sends
+///    two messages through `Chat::send` (which fans out to Bob1).
+/// 3. Bob2 logs in with `Credentials::Login` (fresh session), Bob1 signs
+///    Bob2's `ed25519` with Bob1's SSK (making Bob2 verified).
+/// 4. Bob2's `messages()` returns `text = None` for both messages; the ids
+///    land in `state.pending_decrypt`.
+/// 5. `request_missing_keys()` asks Bob1's session; the auto-responder
+///    verifies Bob2's session and delivers the group keys.
+/// 6. Bob2 can decrypt both messages and has `group_data_state` populated.
+///
+/// The trust chain here is: Bob1's SSK signs Bob2's ed25519. Since Bob2 is
+/// "our other device", the responder accepts without an explicit USK
+/// signature from Bob1 to Bob2's *user* (it would not be applicable — they
+/// are the same user).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_device_recovers_history_from_sibling_device() {
     let alice = common::register_new("hkr_a").await;
@@ -147,6 +206,7 @@ async fn new_device_recovers_history_from_sibling_device() {
         Some("history-1")
     );
 
+    // Bob2 = second login → fresh session_id, same user.
     let mut bob2_client = LockNetClient::new(common::test_config());
     let bob2_session = bob2_client
         .connection_request(Credentials::Login {
@@ -157,9 +217,10 @@ async fn new_device_recovers_history_from_sibling_device() {
         .expect("bob2 login");
     assert_eq!(bob2_session.user_id, bob_uid);
     let bob2_sid = bob2_session.session_id;
-    assert_ne!(bob2_sid, bob1_sid, "Login должен создать новую сессию");
+    assert_ne!(bob2_sid, bob1_sid, "Login must create a new session");
     let bob2_low = bob2_client.get_low_agent().expect("bob2 low");
 
+    // Bob1 signs Bob2's ed25519 with SSK.
     sign_other_session(&bob1_low, &bob_cs, bob_uid, bob2_sid).await;
 
     let bob2_agent = bob2_client.get_agent().expect("bob2 high");
@@ -168,8 +229,8 @@ async fn new_device_recovers_history_from_sibling_device() {
     let history_unread = bob2_chat.messages(None, 20).await.expect("bob2 messages");
     let m1_unread = history_unread.iter().find(|m| m.id == m1.id).expect("m1 in history");
     let m2_unread = history_unread.iter().find(|m| m.id == m2.id).expect("m2 in history");
-    assert_eq!(m1_unread.text, None, "у Bob2 нет ключа для m1");
-    assert_eq!(m2_unread.text, None, "у Bob2 нет ключа для m2");
+    assert_eq!(m1_unread.text, None, "Bob2 has no key for m1");
+    assert_eq!(m2_unread.text, None, "Bob2 has no key for m2");
 
     let (pending_count, imported) = bob2_chat
         .request_missing_keys()
@@ -180,7 +241,7 @@ async fn new_device_recovers_history_from_sibling_device() {
 
     assert!(
         bob2_low.store().group_data_state(group_id).await.is_some(),
-        "Bob2 должен получить group_data через key_request"
+        "Bob2 must receive group_data as part of key_request"
     );
 
     let history_read = bob2_chat.messages(None, 20).await.expect("bob2 messages #2");
@@ -197,6 +258,8 @@ async fn new_device_recovers_history_from_sibling_device() {
     b.client.disconnect().await.ok();
 }
 
+/// With no pending messages, `request_missing_keys()` returns `(0, 0)` and
+/// does not touch the network.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn request_missing_keys_no_pending_is_noop() {
     let alice = common::register_new("hkr_noop_a").await;
@@ -219,6 +282,13 @@ async fn request_missing_keys_no_pending_is_noop() {
     b.client.disconnect().await.ok();
 }
 
+/// A group member who has never been verified (no CS) is denied by the
+/// auto-responder with code `key_denied`.
+///
+/// The test uses the low-level `key_sharing().request()` directly (not
+/// `Chat::request_missing_keys`) so it can observe the `Denied { reason }`
+/// step. The auto-responder in the high layer would produce the same
+/// `key_denied` error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn untrusted_member_is_denied() {
     let alice = common::register_new("hkr_dn_a").await;
@@ -267,7 +337,7 @@ async fn untrusted_member_is_denied() {
                     return Some(reason);
                 }
                 Ok(locknet_rcab::api::low::helpers::key_sharing::KeyRequestStep::Done { total_imported }) => {
-                    panic!("unexpected Done({total_imported}) — Alice shouldn't share with unverified");
+                    panic!("unexpected Done({total_imported}) — Alice must not share with an unverified session");
                 }
                 Ok(_) => continue,
                 Err(e) => panic!("flow error: {e:?}"),
@@ -278,7 +348,7 @@ async fn untrusted_member_is_denied() {
     .await
     .expect("timeout");
 
-    let reason = deadline.expect("Charlie должен был получить Denied");
+    let reason = deadline.expect("Charlie must receive Denied");
     assert!(
         reason.contains("not verified"),
         "unexpected deny reason: {reason}"

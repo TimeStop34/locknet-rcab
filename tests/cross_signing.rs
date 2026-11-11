@@ -1,3 +1,32 @@
+//! Cross-signing — wire-level tests.
+//!
+//! Covers uploading, querying, and resetting cross-signing keys, plus
+//! uploading signatures. All signatures in this file are **fake** (built
+//! manually via `CrossSigningKeysPrivate`) — the tests exercise the server
+//! side of the upload/verify/list protocol, not the trust model (see
+//! `tests/trust_graph.rs` for trust).
+//!
+//! What is verified:
+//!
+//! - `upload_cross_signing_keys` succeeds once; a second call returns
+//!   `cross_signing_already_exists`.
+//! - `query_cross_signing_keys` returns MSK/SSK/USK exactly as uploaded.
+//! - `upload_signatures` with a USK signature over another user's MSK
+//!   succeeds and triggers a `cross_signing_signature_added` push to the
+//!   target user.
+//! - `upload_signatures` with an invalid signature returns
+//!   `invalid_signature`.
+//! - A device self-signature (SSK over the session's own `ed25519`) is
+//!   reflected in `query_cross_signing_keys().devices`.
+//! - `reset_cross_signing_keys` with the wrong password returns
+//!   `invalid_password`; with the correct password it removes all keys,
+//!   strips the user's USK signatures from other MSKs, and notifies affected
+//!   users.
+//! - After a reset, the user can upload a fresh set of keys.
+//!
+//! Not covered here: Web-of-Trust enforcement (`tests/trust_graph.rs`),
+//! SAS/QR (`tests/sas.rs`, `tests/qr.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -42,6 +71,8 @@ fn build_cross_signing_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> 
     }
 }
 
+/// Cross-signing keys can be uploaded exactly once. A second upload with
+/// different (or the same) keys is rejected with `cross_signing_already_exists`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn upload_cross_signing_then_reupload_fails() {
     let alice = common::register_new("cs_up_a").await;
@@ -68,6 +99,8 @@ async fn upload_cross_signing_then_reupload_fails() {
     a.client.disconnect().await.ok();
 }
 
+/// After upload, `query_cross_signing_keys` returns the exact MSK/SSK/USK
+/// that were uploaded (byte-for-byte at the base64 level).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn query_returns_three_keys() {
     let alice = common::register_new("cs_q_a").await;
@@ -107,6 +140,9 @@ async fn query_returns_three_keys() {
     b.client.disconnect().await.ok();
 }
 
+/// Alice's USK signs Bob's MSK; the server verifies the signature and
+/// notifies Bob via `cross_signing_signature_added`. Bob's subsequent
+/// `query_cross_signing_keys` reflects the signature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn usk_signs_other_msk() {
     let alice = common::register_new("cs_sig_a").await;
@@ -187,6 +223,9 @@ async fn usk_signs_other_msk() {
     b.client.disconnect().await.ok();
 }
 
+/// An invalid signature (here: the four bytes `"AAAA"`) is rejected with
+/// `invalid_signature`. Server-side signature verification runs before any
+/// state is mutated.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn invalid_signature_rejected() {
     let alice = common::register_new("cs_bad_a").await;
@@ -227,6 +266,13 @@ async fn invalid_signature_rejected() {
     b.client.disconnect().await.ok();
 }
 
+/// A self-signature of the current session's `ed25519` key (signed by the
+/// user's own SSK) appears under `devices[<session_id>].signatures` in
+/// `query_cross_signing_keys`.
+///
+/// This is the primitive that "device is verified" checks rely on:
+/// `is_session_verified(uid, sid)` in `SecurityHelper` looks exactly at this
+/// entry.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn device_signature_by_own_ssk() {
     let alice = common::register_new("cs_dev_a").await;
@@ -277,6 +323,8 @@ async fn device_signature_by_own_ssk() {
     a.client.disconnect().await.ok();
 }
 
+/// `reset_cross_signing_keys` with the wrong password fails with
+/// `invalid_password`; the keys are not touched.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reset_wrong_password_fails() {
     let alice = common::register_new("cs_rpw_a").await;
@@ -301,6 +349,14 @@ async fn reset_wrong_password_fails() {
     a.client.disconnect().await.ok();
 }
 
+/// Reset with the correct password:
+///
+/// - removes all of Alice's keys;
+/// - strips Alice's USK signature from Bob's MSK (Bob is in
+///   `affected_users`);
+/// - notifies Bob via `cross_signing_reset`;
+/// - Bob's subsequent `query_cross_signing_keys` no longer shows Alice's
+///   signature.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reset_clears_keys_and_affected_signers_notified() {
     let alice = common::register_new("cs_rst_a").await;
@@ -326,6 +382,7 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         .await
         .expect("bob upload");
 
+    // Alice signs Bob's MSK.
     let b_msk = bob_low
         .crypto()
         .query_cross_signing_keys(vec![b_uid])
@@ -344,8 +401,9 @@ async fn reset_clears_keys_and_affected_signers_notified() {
             device_signatures: HashMap::new(),
         })
         .await
-        .expect("a signs b msk");
+        .expect("alice signs bob msk");
 
+    // Bob signs Alice's MSK (so both are in each other's affected_users).
     let a_msk = alice_low
         .crypto()
         .query_cross_signing_keys(vec![a_uid])
@@ -364,7 +422,7 @@ async fn reset_clears_keys_and_affected_signers_notified() {
             device_signatures: HashMap::new(),
         })
         .await
-        .expect("b signs a msk");
+        .expect("bob signs alice msk");
 
     let mut bob_rx = bob_low.subscribe();
     let result = alice_low
@@ -374,7 +432,7 @@ async fn reset_clears_keys_and_affected_signers_notified() {
         .expect("reset");
     assert!(
         result.affected_users.contains(&b_uid),
-        "bob должен быть в affected_users (он подписал MSK alice), got {:?}",
+        "bob must be in affected_users (he signed Alice's MSK), got {:?}",
         result.affected_users
     );
 
@@ -410,6 +468,8 @@ async fn reset_clears_keys_and_affected_signers_notified() {
     b.client.disconnect().await.ok();
 }
 
+/// After a reset, uploading a fresh set of keys succeeds, and the new MSK
+/// differs from the old one.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn can_reupload_after_reset() {
     let alice = common::register_new("cs_reup_a").await;

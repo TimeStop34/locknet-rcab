@@ -1,3 +1,32 @@
+//! End-to-end persistence tests: literal client restart with SQLite storage.
+//!
+//! A "literal restart" means: the client is dropped entirely (WS closed,
+//! runner shut down, store dropped), and a new client is constructed from
+//! the same database file with the same passphrase. This simulates a real
+//! process exit and relaunch.
+//!
+//! What is verified:
+//!
+//! - The Olm identity (`ed25519`) survives the restart, so the same device
+//!   is still recognised by peers.
+//! - Cross-signing keys survive the restart; the device remains
+//!   self-signed.
+//! - The Megolm outbound session survives, so the second `send()` uses the
+//!   same `megolm_session_id` (no spurious rotation).
+//! - The Megolm inbound sessions survive, so historical messages remain
+//!   decryptable after the restart.
+//! - The Olm session to a peer survives, so the next `send()` produces a
+//!   type=1 (normal) message instead of a type=0 pre-key.
+//! - `MegolmOutboundMeta` survives, so the auto-rotation counter and the
+//!   session id are preserved.
+//!
+//! These tests require a real server (they register users and establish
+//! sessions) and the `bundled-sqlcipher` feature of `rusqlite`.
+//!
+//! Not covered here: cross-device recovery via `key_request`
+//! (`tests/high_key_request.rs`), backup export/import across devices
+//! (`tests/high_backup.rs`).
+
 mod common;
 
 use std::path::PathBuf;
@@ -9,6 +38,7 @@ use locknet_rcab::{
 };
 use tokio::sync::broadcast;
 
+// ---- helpers ----
 
 fn tmp_db() -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -65,7 +95,14 @@ async fn warmup_olm(
     a_low.olm().decrypt(p).wait().await.expect("decrypt-rev");
 }
 
+// ---- tests ----
 
+/// Account identity (ed25519) survives a literal restart.
+///
+/// The same user/session reconnects via refresh JWT, and the `Account`
+/// loaded from SQLite exposes the same `ed25519` public key. This is the
+/// foundation for cross-device trust: the peer's `query_keys` returns the
+/// same device identity after the restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn account_identity_survives_literal_restart() {
     let (_dir, db) = tmp_db();
@@ -119,6 +156,8 @@ async fn account_identity_survives_literal_restart() {
     }
 }
 
+/// Cross-signing keys survive a literal restart; the device is still
+/// self-signed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cross_signing_keys_survive_literal_restart() {
     let (_dir, db) = tmp_db();
@@ -184,6 +223,8 @@ async fn cross_signing_keys_survive_literal_restart() {
     }
 }
 
+/// The Megolm outbound session survives a literal restart: after restart,
+/// `send()` uses the **same** `megolm_session_id` rather than rotating.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn megolm_outbound_survives_literal_restart() {
     let (_adir, alice_db) = tmp_db();
@@ -269,6 +310,8 @@ async fn megolm_outbound_survives_literal_restart() {
     }
 }
 
+/// Megolm **inbound** sessions survive a literal restart: after restart,
+/// Bob can still decrypt messages that were sent before the restart.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn megolm_inbound_survives_literal_restart() {
     let (_adir, alice_db) = tmp_db();
@@ -378,6 +421,10 @@ async fn megolm_inbound_survives_literal_restart() {
     }
 }
 
+/// The Olm session with a peer survives a literal restart: the next message
+/// is type=1 (normal), not type=0 (pre-key). This confirms that the ratchet
+/// state persisted correctly and that `olm_persist` flushes after every
+/// mutation.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn olm_session_survives_literal_restart() {
     let (_adir, alice_db) = tmp_db();
@@ -444,7 +491,7 @@ async fn olm_session_survives_literal_restart() {
         let post = alice_low.store().olm_sessions(bob_sid).await;
         assert!(
             !post.is_empty(),
-            "BUG: alice's olm session with bob not restored from SqliteStore after literal restart"
+            "BUG: alice's olm session with bob was not restored from SqliteStore after literal restart"
         );
 
         let bob_curve = {
@@ -471,7 +518,7 @@ async fn olm_session_survives_literal_restart() {
         assert_eq!(
             inner.ciphertext_type, 1,
             "type=1 expected (established outbound preserved), got type={}. \
-             If type=0 — either session lost after restart, or inbound shadowed outbound",
+             If type=0 — either the session was lost after restart, or an inbound session shadowed the outbound",
             inner.ciphertext_type
         );
 
@@ -489,6 +536,9 @@ async fn olm_session_survives_literal_restart() {
     }
 }
 
+/// `MegolmOutboundMeta` (session id, creation timestamp, messages sent)
+/// survives a literal restart, so the auto-rotation counter is not reset by
+/// the restart itself.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn megolm_rotation_meta_survives_literal_restart() {
     let (_adir, alice_db) = tmp_db();

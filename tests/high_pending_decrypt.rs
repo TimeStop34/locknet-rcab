@@ -1,3 +1,37 @@
+//! `HighEvent::MessageDecrypted` — deferred decryption for pending messages.
+//!
+//! When a message arrives **before** its Megolm key, the receiver cannot
+//! decrypt it. The high layer:
+//!
+//! 1. Stores the message in `state.messages` with `text = None`.
+//! 2. Records its id in `state.pending_decrypt[chat_id]`.
+//!
+//! When the key arrives later (via `ln.encryption.group_key`), the high
+//! layer:
+//!
+//! 3. Retries decryption for all pending ids of that chat.
+//! 4. On success, updates `state.messages[id].text` and emits
+//!    `HighEvent::MessageDecrypted { chat_id, message_id, text }`.
+//!
+//! What is verified:
+//!
+//! - The pending message can be read via `Chat::messages()` with
+//!   `text = None` before the key arrives.
+//! - After fan-out, `MessageDecrypted` fires for each pending message
+//!   (both single and multiple pending messages).
+//! - After the event fires, `Chat::messages()` returns the plaintext.
+//!
+//! Requirements:
+//!
+//! - A group via `setup_group_with_two`.
+//! - The test bypasses `Chat::send` on Alice's side: it uses low-level
+//!   `megolm().create` + `encrypt` + `messages().send()` **without**
+//!   fan-out, so Bob does not have the key yet.
+//!
+//! Not covered here: policy checks that gate key delivery
+//! (`tests/history_visibility.rs`), the `key_request` path
+//! (`tests/high_key_request.rs`).
+
 mod common;
 
 use std::time::Duration;
@@ -25,6 +59,9 @@ where
     }
 }
 
+/// A message that arrives before its key is decrypted lazily: `text = None`
+/// in the first `messages()` call, then after fan-out `MessageDecrypted`
+/// fires and `text` becomes `Some(...)`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn message_decrypted_event_after_group_key() {
     let alice = common::register_new("md_a").await;
@@ -51,7 +88,7 @@ async fn message_decrypted_event_after_group_key() {
     let bob_chat = bob_agent.chat(group_id).await.expect("chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == ack.message_id).expect("msg");
-    assert_eq!(msg.text, None, "без ключа text=None");
+    assert_eq!(msg.text, None, "without the key, text must be None");
 
     let mut bob_rx = bob_agent.subscribe();
 
@@ -91,6 +128,8 @@ async fn message_decrypted_event_after_group_key() {
     b.client.disconnect().await.ok();
 }
 
+/// Three messages queued before the key: after fan-out, three
+/// `MessageDecrypted` events fire, each with the correct plaintext.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn multiple_pending_messages_all_decrypted() {
     let alice = common::register_new("md_multi_a").await;
@@ -122,7 +161,7 @@ async fn multiple_pending_messages_all_decrypted() {
     let history = bob_chat.messages(None, 20).await.expect("messages");
     for id in &ack_ids {
         let m = history.iter().find(|m| m.id == *id).expect("msg");
-        assert_eq!(m.text, None, "msg {id}: text=None");
+        assert_eq!(m.text, None, "msg {id}: text=None before key");
     }
 
     let mut bob_rx = bob_agent.subscribe();
@@ -158,7 +197,7 @@ async fn multiple_pending_messages_all_decrypted() {
 
     for (mid, text) in received {
         let expected_idx = ack_ids.iter().position(|id| *id == mid).unwrap();
-        assert_eq!(text, format!("msg-{expected_idx}"), "text for msg {mid}");
+        assert_eq!(text, format!("msg-{expected_idx}"), "plaintext for msg {mid}");
     }
 
     let history2 = bob_chat.messages(None, 20).await.expect("messages 2");

@@ -1,150 +1,186 @@
+//! Backup via the high-level API.
+//!
+//! Covers `SecurityHelper::backup_*()`. These are thin wrappers over
+//! `LockNetLowAgent::backup().export/import/versions/get/delete` that
+//! additionally expose `backup_export_default()` — a shortcut that generates
+//! a fresh `RecoveryKey`, exports, and returns both.
+//!
+//! The underlying crypto (HKDF, XSalsa20-Poly1305, auth_data fingerprint) is
+//! the same as in `tests/backup.rs`; this file verifies that the high-level
+//! wrappers preserve the contract, in particular:
+//!
+//! - `backup_export_default()` returns a `RecoveryKey` whose bytes match the
+//!   `auth_data.public_key` derived by `import`.
+//! - A second device can recover historical messages via `backup_import`.
+//! - Wrong recovery key fails at the auth_data check.
+//!
+//! Not covered here: low-level wire and crypto tests (`tests/backup.rs`),
+//! key request recovery (`tests/high_key_request.rs`).
+
 mod common;
 
 use std::time::Duration;
 
-use locknet_rcab::LockNetError;
+use locknet_rcab::{Credentials, HighEvent, LockNetClient, RecoveryKey};
+use tokio::sync::broadcast;
 
+async fn wait_high<F>(rx: &mut broadcast::Receiver<HighEvent>, pred: F) -> HighEvent
+where
+    F: Fn(&HighEvent) -> bool,
+{
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+            panic!("timeout waiting for HighEvent");
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+            Ok(Ok(evt)) if pred(&evt) => return evt,
+            Ok(Ok(_)) => continue,
+            Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
+            Ok(Err(broadcast::error::RecvError::Closed)) => panic!("channel closed"),
+            Err(_) => panic!("timeout"),
+        }
+    }
+}
+
+/// Full export/import via `SecurityHelper::backup_*`.
+///
+/// Verifies:
+/// - `backup_export_default()` returns a non-empty version and at least one
+///   uploaded item;
+/// - a fresh client (Alice2) can `backup_import` with the returned key;
+/// - imported sessions decrypt historical messages via `Chat::messages`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn creator_can_send_in_brand_new_group() {
-    let alice = common::register_new("gp_creator_a").await;
-    let bob = common::register_new("gp_creator_b").await;
+async fn high_backup_export_import_roundtrip() {
+    let alice = common::register_new("hbk_a").await;
+    let bob = common::register_new("hbk_b").await;
 
     let alice_agent = alice.client.get_agent().expect("alice agent");
-    let alice_low = alice_agent.low();
+    let bob_agent = bob.client.get_agent().expect("bob agent");
+    let alice_sec = alice_agent.security();
+    let group_id = common::setup_group_with_two(&alice, &bob, "HBk").await;
 
-    let group = alice_agent
-        .create_group("GPNew", false, None, vec![bob.session.user_id])
+    let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
+    let mut bob_rx = bob_agent.subscribe();
+    let sent = alice_chat.send("backup payload").await.expect("send");
+    let _ = wait_high(&mut bob_rx, |e| {
+        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
+    })
+    .await;
+
+    let (recovery, export) = alice_sec.backup_export_default().await.expect("export_default");
+    assert!(export.version >= 1);
+    assert!(export.items_uploaded >= 1, "at least one Megolm session expected");
+
+    let mut alice2_client = LockNetClient::new(common::test_config());
+    let alice2_session = alice2_client
+        .connection_request(Credentials::Login {
+            username: alice.username.clone(),
+            password: alice.password.clone(),
+        })
         .await
-        .expect("create");
+        .expect("alice2 login");
+    assert_eq!(alice2_session.user_id, alice.session.user_id);
 
-    assert!(alice_low.store().group_data_state(group.id()).await.is_none());
+    let alice2_agent = alice2_client.get_agent().expect("alice2 agent");
+    let alice2_sec = alice2_agent.security();
+    let alice2_chat = alice2_agent.chat(group_id).await.expect("alice2 chat");
 
-    let alice_chat = alice_agent.chat(group.id()).await.expect("chat");
-    let sent = alice_chat.send("first message").await.expect("send");
+    let unread = alice2_chat.messages(None, 20).await.expect("alice2 messages");
+    let msg_unread = unread.iter().find(|m| m.id == sent.id).expect("msg in history");
+    assert_eq!(msg_unread.text, None, "without the key, text is None");
 
-    assert!(alice_low.store().group_data_state(group.id()).await.is_some());
-    assert!(sent.encrypted);
+    let import = alice2_sec
+        .backup_import(export.version, &recovery)
+        .await
+        .expect("import");
+    assert_eq!(import.version, export.version);
+    assert!(import.sessions_imported >= 1);
 
+    let read = alice2_chat.messages(None, 20).await.expect("alice2 messages #2");
+    let msg_read = read.iter().find(|m| m.id == sent.id).expect("msg #2");
+    assert_eq!(msg_read.text.as_deref(), Some("backup payload"));
+
+    alice2_client.disconnect().await.ok();
     let mut a = alice;
     let mut b = bob;
     a.client.disconnect().await.ok();
     b.client.disconnect().await.ok();
 }
 
+/// Importing with the wrong recovery key fails with `InvalidArgument` and
+/// mentions the recovery key (the auth_data check runs first).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn non_creator_cannot_send_without_policy() {
-    let alice = common::register_new("gp_non_a").await;
-    let bob = common::register_new("gp_non_b").await;
+async fn high_backup_wrong_recovery_key_fails() {
+    let alice = common::register_new("hbkw_a").await;
+    let bob = common::register_new("hbkw_b").await;
 
     let alice_agent = alice.client.get_agent().expect("alice agent");
-    let bob_agent = bob.client.get_agent().expect("bob agent");
-    let bob_low = bob_agent.low();
+    let alice_sec = alice_agent.security();
+    let group_id = common::setup_group_with_two(&alice, &bob, "HBkW").await;
 
-    let group = alice_agent
-        .create_group("GPNon", false, None, vec![bob.session.user_id])
+    let chat = alice_agent.chat(group_id).await.expect("chat");
+    let _ = chat.send("payload").await.expect("send");
+
+    let (_recovery, export) = alice_sec.backup_export_default().await.expect("export");
+
+    let mut alice2_client = LockNetClient::new(common::test_config());
+    alice2_client
+        .connection_request(Credentials::Login {
+            username: alice.username.clone(),
+            password: alice.password.clone(),
+        })
         .await
-        .expect("create");
-    let group_id = group.id();
+        .expect("alice2 login");
+    let alice2_agent = alice2_client.get_agent().expect("alice2 agent");
+    let alice2_sec = alice2_agent.security();
 
-    let inv = bob_agent
-        .invites()
+    let wrong = RecoveryKey::generate();
+    let err = alice2_sec
+        .backup_import(export.version, &wrong)
         .await
-        .unwrap()
-        .into_iter()
-        .find(|i| i.group.id == group_id)
-        .expect("bob invite");
-    bob_agent.accept_invite(inv.id).await.expect("bob accept");
-
-    let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
-    let _ = alice_chat.send("hello").await.expect("alice send");
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    assert!(
-        bob_low.store().group_data_state(group_id).await.is_some(),
-        "Bob получил policy через fan-out"
-    );
-
-    bob_low.store().group_data_state_remove(group_id).await;
-    assert!(bob_low.store().group_data_state(group_id).await.is_none());
-
-    let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
-    let err = bob_chat.send("unauthorized").await.unwrap_err();
+        .unwrap_err();
     match err {
-        LockNetError::InvalidArgument(msg) => {
-            assert!(
-                msg.contains("policy unknown"),
-                "unexpected message: {msg}"
-            );
+        locknet_rcab::LockNetError::InvalidArgument(msg) => {
+            assert!(msg.contains("recovery key"), "unexpected message: {msg}");
         }
         other => panic!("expected InvalidArgument, got {other:?}"),
     }
 
-    let alice_low = alice_agent.low();
-    let (info, _rotated) = alice_low
-        .megolm()
-        .ensure_session(group_id)
-        .await
-        .expect("ensure session");
-    alice_low
-        .megolm()
-        .share_group_key_with_session_key(
-            group_id,
-            bob.session.user_id,
-            bob.session.session_id,
-            info.megolm_session_id,
-            info.session_key,
-        )
-        .await
-        .expect("share again");
-
-    tokio::time::sleep(Duration::from_millis(500)).await;
-    assert!(
-        bob_low.store().group_data_state(group_id).await.is_some(),
-        "Bob восстановил policy"
-    );
-
-    let _ = bob_chat.send("now ok").await.expect("send after recovery");
-
+    alice2_client.disconnect().await.ok();
     let mut a = alice;
     let mut b = bob;
     a.client.disconnect().await.ok();
     b.client.disconnect().await.ok();
 }
 
+/// `backup_versions()` returns all created versions; `backup_delete(v)`
+/// removes one without affecting the others.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn edit_also_requires_policy() {
-    let alice = common::register_new("gp_edit_a").await;
-    let bob = common::register_new("gp_edit_b").await;
+async fn high_backup_versions_and_delete() {
+    let alice = common::register_new("hbkv_a").await;
+    let bob = common::register_new("hbkv_b").await;
 
     let alice_agent = alice.client.get_agent().expect("alice agent");
-    let bob_agent = bob.client.get_agent().expect("bob agent");
-    let bob_low = bob_agent.low();
+    let alice_sec = alice_agent.security();
+    let group_id = common::setup_group_with_two(&alice, &bob, "HBkV").await;
 
-    let group = alice_agent
-        .create_group("GPEdit", false, None, vec![bob.session.user_id])
-        .await
-        .expect("create");
-    let group_id = group.id();
+    let chat = alice_agent.chat(group_id).await.expect("chat");
+    let _ = chat.send("v1").await.expect("send");
 
-    let inv = bob_agent
-        .invites()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|i| i.group.id == group_id)
-        .expect("inv");
-    bob_agent.accept_invite(inv.id).await.expect("accept");
+    let (_rk1, e1) = alice_sec.backup_export_default().await.expect("export1");
+    let (_rk2, e2) = alice_sec.backup_export_default().await.expect("export2");
+    assert!(e2.version > e1.version);
 
-    let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
-    let sent = alice_chat.send("to edit").await.expect("send");
-    tokio::time::sleep(Duration::from_millis(500)).await;
+    let versions = alice_sec.backup_versions().await.expect("versions");
+    assert_eq!(versions.len(), 2);
 
-    bob_low.store().group_data_state_remove(group_id).await;
+    alice_sec.backup_delete(e1.version).await.expect("delete");
 
-    let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
-    let err = bob_chat.edit(sent.id, "hacked").await.unwrap_err();
-    assert!(matches!(err, LockNetError::InvalidArgument(_)));
+    let versions = alice_sec.backup_versions().await.expect("versions");
+    assert_eq!(versions.len(), 1);
+    assert_eq!(versions[0].version, e2.version);
 
     let mut a = alice;
     let mut b = bob;

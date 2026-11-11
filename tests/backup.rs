@@ -1,3 +1,37 @@
+//! Key backup — wire protocol and real crypto.
+//!
+//! Covers two layers:
+//!
+//! **Wire-level** (`LockNetBackupHelper` methods without crypto):
+//! - `versions()` / `new_version()` / `put()` / `get()` / `delete()`.
+//! - Item overwrite semantics, missing version errors, isolation between
+//!   users.
+//!
+//! **Crypto-level** (`export()` / `import()`):
+//! - `RecoveryKey` → `backup_secret` via HKDF-SHA256 (info =
+//!   `LOCKNET_ENCRYPTION_BACKUP_V1`).
+//! - `auth_data.public_key` = `b64(sha256(backup_secret))`.
+//! - Item encryption: XSalsa20-Poly1305 (`crypto_secretbox`), compatible
+//!   with libsodium `SecretBox`.
+//! - Item id format: `"<chat_id>:<megolm_session_id>"`.
+//! - Import rejects mismatched `recovery_key` (auth_data check runs before
+//!   decryption).
+//! - Sessions recovered into a fresh device's store can decrypt historical
+//!   messages.
+//!
+//! Requirements:
+//!
+//! - `setup_full()` for at least Alice (exports need cross-signing to be
+//!   available; import on the new device also expects cross-signing to have
+//!   been set up previously, or the test exercises only the session
+//!   recovery path).
+//! - A Megolm session must exist in Alice's store before `export()`; the
+//!   simplest way is `megolm().create(group_id)` followed by `encrypt`.
+//!
+//! Not covered here: high-level flow via `SecurityHelper::backup_*`
+//! (`tests/high_backup.rs`), server-side rate limits, cross-device recovery
+//! via `key_request` (see `tests/high_key_request.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -8,6 +42,8 @@ use locknet_rcab::api::low::helpers::backup::RecoveryKey;
 use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, DeviceKeys, Signatures};
 use locknet_rcab::{Credentials, LockNetClient, LockNetLowAgent};
+
+// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -79,7 +115,10 @@ async fn upload_keys_for_low(low: &LockNetLowAgent) {
     low.keys().upload(keys).await.expect("upload_keys");
 }
 
+// ---- wire-level tests ----
 
+/// A fresh user has no backup versions; `new_version` creates v1 with the
+/// given `auth_data`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_empty_then_new_version() {
     let user = common::register_new("bk_new").await;
@@ -108,6 +147,8 @@ async fn backup_empty_then_new_version() {
     u.client.disconnect().await.ok();
 }
 
+/// `put` + `get` round-trip: multiple items are stored and retrieved with
+/// the exact blob contents (no transformation on the wire layer).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_put_get_roundtrip() {
     let user = common::register_new("bk_rtt").await;
@@ -143,6 +184,9 @@ async fn backup_put_get_roundtrip() {
     u.client.disconnect().await.ok();
 }
 
+/// `put` with an existing `item_id` overwrites the previous blob (server-side
+/// upsert semantics; `count` reflects the number of items in the request,
+/// not the number of new items).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_put_overwrites_same_item() {
     let user = common::register_new("bk_ovr").await;
@@ -178,6 +222,7 @@ async fn backup_put_overwrites_same_item() {
     u.client.disconnect().await.ok();
 }
 
+/// `put` into an unknown version yields `backup_version_not_found`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_put_missing_version_fails() {
     let user = common::register_new("bk_miss_put").await;
@@ -193,6 +238,7 @@ async fn backup_put_missing_version_fails() {
     u.client.disconnect().await.ok();
 }
 
+/// `get` from an unknown version yields `backup_version_not_found`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_get_missing_version_fails() {
     let user = common::register_new("bk_miss_get").await;
@@ -205,6 +251,7 @@ async fn backup_get_missing_version_fails() {
     u.client.disconnect().await.ok();
 }
 
+/// `delete` removes the version and all its items.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_delete_removes_version() {
     let user = common::register_new("bk_del").await;
@@ -232,6 +279,8 @@ async fn backup_delete_removes_version() {
     u.client.disconnect().await.ok();
 }
 
+/// Versions increment monotonically and preserve their `auth_data`
+/// independently.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_multiple_versions_increment() {
     let user = common::register_new("bk_multi").await;
@@ -255,6 +304,7 @@ async fn backup_multiple_versions_increment() {
     u.client.disconnect().await.ok();
 }
 
+/// Backup is scoped per user: Bob cannot see or read Alice's versions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_isolated_between_users() {
     let alice = common::register_new("bk_iso_a").await;
@@ -284,7 +334,16 @@ async fn backup_isolated_between_users() {
     b.client.disconnect().await.ok();
 }
 
+// ---- crypto-level tests ----
 
+/// Full export/import round-trip: Alice exports, Alice2 (second session)
+/// imports, and decrypts the historical message.
+///
+/// Verifies:
+/// - `export()` produces exactly one item (one Megolm inbound session);
+/// - `auth_data.public_key` is present;
+/// - `import()` with the same `recovery_key` succeeds;
+/// - the imported session decrypts the message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_export_import_roundtrip() {
     let alice = common::register_new("bkrt_a").await;
@@ -306,7 +365,7 @@ async fn backup_export_import_roundtrip() {
     let export = alice_low.backup().export(&recovery).await.expect("export");
 
     assert!(export.version >= 1);
-    assert_eq!(export.items_uploaded, 1, "expected 1 megolm session");
+    assert_eq!(export.items_uploaded, 1, "expected exactly one Megolm session");
 
     let versions = alice_low.backup().versions().await.expect("versions");
     let found = versions.iter().find(|v| v.version == export.version).expect("version");
@@ -350,6 +409,11 @@ async fn backup_export_import_roundtrip() {
     b.client.disconnect().await.ok();
 }
 
+/// Importing with the wrong `recovery_key` fails at the `auth_data.public_key`
+/// check, before any ciphertext is decrypted.
+///
+/// This means a wrong key cannot even be "tried" per item — the failure is
+/// surfaced as `InvalidArgument("recovery key does not match ...")`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_wrong_recovery_key_fails() {
     let alice = common::register_new("bkwrk_a").await;
@@ -402,6 +466,8 @@ async fn backup_wrong_recovery_key_fails() {
     b.client.disconnect().await.ok();
 }
 
+/// Exporting with an empty store produces `items_uploaded = 0`, and importing
+/// that empty version succeeds with `sessions_imported = 0`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_empty_store_exports_zero_items() {
     let alice = common::register_new("bkempty_a").await;
@@ -412,7 +478,7 @@ async fn backup_empty_store_exports_zero_items() {
     let export = alice_low.backup().export(&recovery).await.expect("export");
 
     assert!(export.version >= 1);
-    assert_eq!(export.items_uploaded, 0, "no megolm sessions → 0 items");
+    assert_eq!(export.items_uploaded, 0, "no Megolm sessions → 0 items");
 
     let import = alice_low
         .backup()
@@ -426,6 +492,8 @@ async fn backup_empty_store_exports_zero_items() {
     a.client.disconnect().await.ok();
 }
 
+/// Multiple sessions across multiple chats, plus a rotation, produce three
+/// items; importing restores all three and decrypts each message.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_multi_session() {
     let alice = common::register_new("bkmulti_a").await;
@@ -452,7 +520,7 @@ async fn backup_multi_session() {
 
     let recovery = RecoveryKey::generate();
     let export = alice_low.backup().export(&recovery).await.expect("export");
-    assert_eq!(export.items_uploaded, 3, "expected 3 megolm sessions");
+    assert_eq!(export.items_uploaded, 3, "expected 3 Megolm sessions");
 
     let mut alice2_client = LockNetClient::new(common::test_config());
     alice2_client
@@ -492,6 +560,7 @@ async fn backup_multi_session() {
     b.client.disconnect().await.ok();
 }
 
+/// Importing an unknown version fails with `backup_version_not_found`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_import_missing_version_fails() {
     let alice = common::register_new("bkmis_a").await;
@@ -512,11 +581,14 @@ async fn backup_import_missing_version_fails() {
     a.client.disconnect().await.ok();
 }
 
+/// `RecoveryKey` is base64-encoded without padding (32 bytes → 43 chars) and
+/// round-trips through `to_base64`/`from_base64`. Wrong-length inputs are
+/// rejected with `InvalidArgument`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_recovery_key_serde() {
     let rk = RecoveryKey::generate();
     let b64 = rk.to_base64();
-    assert_eq!(b64.len(), 43, "32 bytes без padding = 43 base64 chars");
+    assert_eq!(b64.len(), 43, "32 bytes without padding = 43 base64 characters");
 
     let recovered = RecoveryKey::from_base64(&b64).expect("from_base64");
     assert_eq!(rk.as_bytes(), recovered.as_bytes());
@@ -528,6 +600,12 @@ async fn backup_recovery_key_serde() {
     assert!(matches!(err, locknet_rcab::LockNetError::InvalidArgument(_)));
 }
 
+/// Alice's backup restores history on a new device after Alice1 has "gone
+/// offline".
+///
+/// This is the recovery story for a lost device: as long as the user still
+/// remembers the `recovery_key`, the new device can decrypt the historical
+/// messages without needing any other device to be online.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_recovers_history_for_lost_device() {
     let alice = common::register_new("bkhist_a").await;
@@ -574,6 +652,7 @@ async fn backup_recovers_history_for_lost_device() {
         .expect("alice2 reconnect");
     let alice2_low = alice2_client.get_low_agent().expect("alice2 low");
 
+    // Session credentials do not trigger upload_keys; do it manually.
     upload_keys_for_low(&alice2_low).await;
 
     assert!(alice2_low.megolm().decrypt(group_id, &enc).await.unwrap().is_none());

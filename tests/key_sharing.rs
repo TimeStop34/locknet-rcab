@@ -1,3 +1,35 @@
+//! `ln.encryption.key_request` — low-level API.
+//!
+//! Covers the requester/responder protocols directly through
+//! `LockNetLowAgent::key_sharing()`. For the high-level "give me my missing
+//! messages" flow via `Chat::request_missing_keys`, see
+//! `tests/high_key_request.rs`.
+//!
+//! Protocol messages:
+//!
+//! - `ln.encryption.key_request` — `{transaction_id, chat_ids, have}`; sent
+//!   by the requester. `have` lists `"<chat_id>:<megolm_session_id>"` keys
+//!   the requester already holds so the responder does not resend them.
+//! - `ln.encryption.group_key` — one per missing session; same shape as the
+//!   normal fan-out payload.
+//! - `ln.encryption.key_request_done` — `{transaction_id, count}`; terminator.
+//! - `ln.encryption.key_denied` — `{transaction_id, reason}`; alternative
+//!   terminator when the responder refuses (e.g. trust check fails).
+//!
+//! Trust and policy are **responder-side** decisions; this file exercises
+//! the wire protocol directly, so tests here drive the responder side
+//! manually (`send_group_key`, `send_done`, `send_denied`). For
+//! policy-driven auto-response, see `tests/history_visibility.rs`.
+//!
+//! Requirements:
+//!
+//! - `setup_full()` for both sides: the responder-side auto-responder (used
+//!   by the high layer) rejects unverified sessions; the manual responder in
+//!   these tests bypasses that by calling `send_group_key` directly, but the
+//!   Olm session still needs to be established.
+//! - `setup_olm()` before any exchange: all key-sharing messages go through
+//!   Olm.
+
 mod common;
 
 use std::collections::HashMap;
@@ -8,6 +40,7 @@ use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, DeviceKeys, Signatures};
 use locknet_rcab::{Credentials, Event, LockNetClient, LockNetLowAgent};
 
+// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -108,7 +141,18 @@ async fn setup_olm(
     a_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
 }
 
+// ---- tests ----
 
+/// Full happy path: Bob requests, Alice responds with two sessions, then
+/// `done(2)`.
+///
+/// Verifies:
+/// - Bob's `have` is empty (he has no sessions yet);
+/// - Alice receives the `key_request` with the correct `transaction_id` and
+///   `chat_ids`;
+/// - Bob imports both sessions and can decrypt both messages;
+/// - the flow terminates in `KeyRequestStep::Done { total_imported: 2 }`;
+/// - a subsequent `next()` re-returns the same `Done` (idempotent).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_full_flow() {
     let alice = common::register_new("ks_full_a").await;
@@ -154,7 +198,7 @@ async fn key_sharing_full_flow() {
 
     assert_eq!(incoming.transaction_id, txid);
     assert_eq!(incoming.chat_ids, vec![group_id]);
-    assert!(incoming.have.is_empty(), "bob не имел ключей — have пустой");
+    assert!(incoming.have.is_empty(), "bob has no keys yet, have must be empty");
 
     alice_low
         .key_sharing()
@@ -214,6 +258,7 @@ async fn key_sharing_full_flow() {
     let pt2 = bob_low.megolm().decrypt(group_id, &enc2).await.unwrap().unwrap();
     assert_eq!(pt2, "msg2");
 
+    // Done is sticky.
     let again = bob_flow.next().await.expect("bob next again");
     assert!(matches!(again, KeyRequestStep::Done { total_imported: 2 }));
 
@@ -224,6 +269,13 @@ async fn key_sharing_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// Bob's `have` filters out sessions he already holds.
+///
+/// Setup: Alice creates two sessions; Bob imports the first manually before
+/// calling `request`. Verifies:
+/// - Bob's `have` contains exactly `"<chat>:<session1>"`;
+/// - Alice (simulating the auto-responder) sends only session 2;
+/// - Bob imports one key, done(1).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_have_filters() {
     let alice = common::register_new("ks_have_a").await;
@@ -310,7 +362,7 @@ async fn key_sharing_have_filters() {
                 total = total_imported;
                 break;
             }
-            other => panic!("unexpected: {other:?}"),
+            other => panic!("unexpected step: {other:?}"),
         }
     }
     assert_eq!(imported_count, 1);
@@ -322,6 +374,8 @@ async fn key_sharing_have_filters() {
     b.client.disconnect().await.ok();
 }
 
+/// Responder can deny with `send_denied(reason)`; the requester surfaces
+/// `KeyRequestStep::Denied { reason }` (idempotent on repeated `next()`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_denied() {
     let alice = common::register_new("ks_den_a").await;
@@ -380,6 +434,8 @@ async fn key_sharing_denied() {
     b.client.disconnect().await.ok();
 }
 
+/// `cancel()` before the responder replies transitions the flow to
+/// `KeyRequestStep::Cancelled("cancelled by user")`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_cancel_before_response() {
     let alice = common::register_new("ks_cnc_a").await;
@@ -419,6 +475,10 @@ async fn key_sharing_cancel_before_response() {
     b.client.disconnect().await.ok();
 }
 
+/// Responder can reply `done(0)` — no keys available for the requested chats
+/// (for example, the responder holds no Megolm sessions).
+///
+/// The requester sees `Done { total_imported: 0 }` rather than an error.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_done_with_zero() {
     let alice = common::register_new("ks_zero_a").await;
@@ -472,6 +532,13 @@ async fn key_sharing_done_with_zero() {
     b.client.disconnect().await.ok();
 }
 
+/// Second device of Bob recovers history from Alice after his first device
+/// goes offline.
+///
+/// Bob2 reconnects with `Credentials::Session` (refresh JWT), so his
+/// `session_id` is preserved but his local Megolm store is empty. Alice is
+/// the only other member; the protocol requires her to `send_group_key` for
+/// the historical session.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn key_sharing_second_device_recovers_history() {
     let alice = common::register_new("ks_dev_a").await;
@@ -511,9 +578,11 @@ async fn key_sharing_second_device_recovers_history() {
         "for history"
     );
 
+    // Bob1 goes offline.
     let mut bob1 = bob;
     bob1.client.disconnect().await.ok();
 
+    // Bob2 reconnects with the same session_id via refresh.
     let mut bob2_client = LockNetClient::new(common::test_config());
     let bob2_session = bob2_client
         .connection_request(Credentials::Session {
@@ -525,10 +594,12 @@ async fn key_sharing_second_device_recovers_history() {
     let bob2_low = bob2_client.get_low_agent().expect("bob2 low");
     let bob2_sid = bob2_session.session_id;
 
+    // Session credentials do not trigger upload_keys; upload manually.
     upload_keys_for_low(&bob2_low).await;
 
     setup_olm(&alice_low, &bob2_low, bob_uid, bob2_sid).await;
 
+    // Bob2 has no Megolm key — cannot decrypt.
     assert!(bob2_low.megolm().decrypt(group_id, &enc).await.unwrap().is_none());
 
     let mut alice_rx = alice_low.subscribe();
@@ -586,7 +657,7 @@ async fn key_sharing_second_device_recovers_history() {
 
     assert!(
         bob2_low.store().group_data_state(group_id).await.is_some(),
-        "Bob2 должен получить group_data через key_request"
+        "Bob2 must receive group_data as part of key_request"
     );
 
     let pt = bob2_low.megolm().decrypt(group_id, &enc).await.unwrap().unwrap();

@@ -1,3 +1,49 @@
+//! `HistoryVisibility` policy enforcement.
+//!
+//! Policies are **client-side**: the responder-side auto-responder
+//! (`respond_key_request` in `api/high/agent.rs`) reads the group's
+//! `GroupDataState` and decides whether to send the requested Megolm keys.
+//! The server cannot read or enforce the policy.
+//!
+//! Three values:
+//!
+//! - **AfterJoin** — historical messages are never shared; every
+//!   `key_request` is rejected with `key_denied(history_visibility_policy)`.
+//! - **AllVerifiedSessions** — share with any session whose `ed25519` is
+//!   signed by its owner's SSK (session-verified).
+//! - **AllVerifiedUsers** — share only with sessions that are both
+//!   session-verified **and** whose owner is trusted via the Web of Trust
+//!   (`USK -> MSK` chain).
+//!
+//! What is verified:
+//!
+//! - `AfterJoin` denies all `key_request`s (Bob cannot read the historical
+//!   message).
+//! - `AllVerifiedSessions` accepts a `session-verified` recipient without
+//!   requiring a `USK -> MSK` signature.
+//! - `AllVerifiedUsers` rejects a session-verified user who has not been
+//!   `USK`-verified; after the signer uploads a `USK -> MSK` signature, a
+//!   subsequent `key_request` succeeds.
+//! - `AllVerifiedUsers` accepts Bob after SAS (via `is_user_verified`
+//!   becoming true).
+//!
+//! Test pattern: Alice sends a message via `alice_send_no_fanout` (low-level
+//! `create + encrypt + send` **without** fan-out) so Bob genuinely lacks the
+//! key, then the test uses `set_history_visibility(...)` to overwrite the
+//! local `GroupDataState` (bumping `version`) and calls
+//! `Chat::request_missing_keys`. The server does not enforce the policy, so
+//! this works.
+//!
+//! Requirements:
+//!
+//! - Both sides have cross-signing (`setup_high`).
+//! - Alice must be the creator of the group (the responder for
+//!   `key_request`).
+//!
+//! Not covered here: `MegolmRotationVisibility` enforcement
+//! (`tests/megolm_visibility.rs`), WoT transitive trust
+//! (`tests/trust_graph.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -7,6 +53,8 @@ use locknet_rcab::core::crypto::signature::{sign_b64, CrossSigningKeysPrivate};
 use locknet_rcab::core::policies::HistoryVisibility;
 use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{LockNetError, LockNetLowAgent};
+
+// ---- helpers ----
 
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
@@ -61,6 +109,8 @@ async fn setup_high(user: &common::TestUser) -> CrossSigningKeysPrivate {
     keys
 }
 
+/// Sign the target user's MSK with the signer's USK, then invalidate the
+/// signer's WoT cache so the next `is_user_verified` rebuilds the graph.
 async fn sign_msk(
     signer_agent: &locknet_rcab::LockNetAgent,
     signer_keys: &CrossSigningKeysPrivate,
@@ -82,6 +132,8 @@ async fn sign_msk(
     signer_agent.security().invalidate_trust_cache().await;
 }
 
+/// Overwrite the local `GroupDataState.history_visibility` (and bump
+/// `version` to defeat the anti-replay check in `decrypt_group_key`).
 async fn set_history_visibility(low: &LockNetLowAgent, chat_id: i64, vis: HistoryVisibility) {
     use locknet_rcab::core::crypto::group_data::encrypt_group_data;
     use locknet_rcab::core::policies::GroupDataState;
@@ -97,12 +149,22 @@ async fn set_history_visibility(low: &LockNetLowAgent, chat_id: i64, vis: Histor
     ).await;
 }
 
+/// Alice sends a message using low-level primitives **without** fan-out, so
+/// Bob does not get the Megolm key. This is the setup for testing
+/// policy-driven `key_request` behaviour.
 async fn alice_send_no_fanout(low: &LockNetLowAgent, chat_id: i64, text: &str) -> i64 {
     low.megolm().create(chat_id).await.expect("create");
     let enc = low.megolm().encrypt(chat_id, text).await.expect("encrypt");
     low.messages().send(chat_id, enc).await.expect("send").message_id
 }
 
+// ---- tests ----
+
+/// `AfterJoin` denies all `key_request`s.
+///
+/// Bob has no key for the message; Alice's responder sees the policy and
+/// refuses with `key_denied(history_visibility_policy)`. Bob's
+/// `request_missing_keys` surfaces this as `LockNetError::Server`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn after_join_denies_all() {
     let alice = common::register_new("hv_aj_a").await;
@@ -125,7 +187,7 @@ async fn after_join_denies_all() {
     let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == msg_id).expect("msg in history");
-    assert_eq!(msg.text, None, "Bob без ключа не может читать");
+    assert_eq!(msg.text, None, "Bob has no key and cannot read it");
 
     let err = bob_chat.request_missing_keys().await.unwrap_err();
     match err {
@@ -143,6 +205,8 @@ async fn after_join_denies_all() {
     b.client.disconnect().await.ok();
 }
 
+/// `AllVerifiedSessions` accepts a `session-verified` recipient even if the
+/// recipient has no `USK -> MSK` signature from Alice.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_verified_sessions_accepts_any_session_with_cs() {
     let alice = common::register_new("hv_avs_a").await;
@@ -168,7 +232,7 @@ async fn all_verified_sessions_accepts_any_session_with_cs() {
         .await
         .expect("request_missing_keys");
     assert!(pending >= 1);
-    assert!(imported >= 1, "Bob (session-verified) должен получить ключ");
+    assert!(imported >= 1, "Bob (session-verified) must receive the key");
 
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == msg_id).expect("msg");
@@ -180,6 +244,11 @@ async fn all_verified_sessions_accepts_any_session_with_cs() {
     b.client.disconnect().await.ok();
 }
 
+/// `AllVerifiedUsers` requires a `USK -> MSK` signature from Alice to Bob.
+///
+/// Before the signature, the responder rejects (`key_denied`). After
+/// `sign_msk(alice, bob)` and a cache invalidation, a second
+/// `request_missing_keys` succeeds.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_verified_users_requires_user_trust() {
     let alice = common::register_new("hv_avu_a").await;
@@ -209,6 +278,7 @@ async fn all_verified_users_requires_user_trust() {
         other => panic!("expected Server(key_denied), got {other:?}"),
     }
 
+    // Alice signs Bob's MSK — Bob becomes user-verified from Alice's POV.
     sign_msk(&alice_agent, &alice_keys, bob_uid).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -221,7 +291,7 @@ async fn all_verified_users_requires_user_trust() {
         .await
         .expect("second request_missing_keys");
     assert!(pending >= 1);
-    assert!(imported >= 1, "после USK-подписи Bob получает ключ");
+    assert!(imported >= 1, "after the USK signature, Bob receives the key");
 
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == msg_id).expect("msg");
@@ -233,6 +303,8 @@ async fn all_verified_users_requires_user_trust() {
     b.client.disconnect().await.ok();
 }
 
+/// `AllVerifiedUsers` accepts Bob after SAS (`is_user_verified` returns
+/// true because SAS signed the MSK as part of the flow).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn all_verified_users_accepts_after_sas() {
     let alice = common::register_new("hv_avu_sas_a").await;

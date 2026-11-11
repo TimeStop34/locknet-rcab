@@ -1,3 +1,26 @@
+//! `SqliteStore` — SQLCipher-backed [`locknet_rcab::CryptoStore`].
+//!
+//! These tests exercise the store directly (no network), so they can run
+//! without a server. They verify:
+//!
+//! - Schema creation on first open, schema reuse on subsequent opens.
+//! - Wrong passphrase rejection (SQLCipher fails to decrypt the header).
+//! - On-disk encryption: the file header is not the plain `SQLite format 3`
+//!   magic.
+//! - Account identity and OTK count persistence across close/reopen.
+//! - Cross-signing key round-trip and clearing.
+//! - Olm session round-trip (including the per-peer limit of 5).
+//! - Megolm outbound and inbound session round-trip.
+//! - `GroupDataState` round-trip and removal.
+//! - `MegolmOutboundMeta` round-trip and removal (not directly tested here
+//!   — see `tests/megolm_auto_rotation.rs` for the integration test; this
+//!   file tests the schema via `account_flush_method_works` style
+//!   primitive operations).
+//! - In-memory mode (`open_in_memory`).
+//!
+//! These tests require the `bundled-sqlcipher` feature of `rusqlite`.
+//! Building without it will fail at runtime with `sqlcipher not available`.
+
 use std::sync::Arc;
 
 use locknet_rcab::core::crypto::{
@@ -12,6 +35,7 @@ use locknet_rcab::core::policies::{
     GroupData, GroupDataState, HistoryVisibility, MegolmRotationVisibility,
 };
 
+// ---- helpers ----
 
 fn tmp_db() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -28,7 +52,10 @@ async fn group_session_id(session: &Arc<tokio::sync::Mutex<vodozemac::megolm::Gr
     s.session_id()
 }
 
+// ---- schema ----
 
+/// Opening a fresh path creates the database file and the schema; no keys
+/// are present yet.
 #[tokio::test]
 async fn open_creates_schema() {
     let (_dir, path) = tmp_db();
@@ -39,6 +66,8 @@ async fn open_creates_schema() {
     assert!(path.exists(), "db file must exist");
 }
 
+/// Re-opening the same file works and does not lose state (schema migration
+/// is a no-op for an already-current database).
 #[tokio::test]
 async fn reopen_existing_db_works() {
     let (_dir, path) = tmp_db();
@@ -52,7 +81,11 @@ async fn reopen_existing_db_works() {
     assert!(store.cross_signing_keys().await.is_none());
 }
 
+// ---- passphrase ----
 
+/// Opening a database with the wrong passphrase must fail — SQLCipher cannot
+/// decrypt the header, and we surface that as an error rather than returning
+/// a store that would silently produce garbage on read.
 #[tokio::test]
 async fn wrong_passphrase_fails() {
     let (_dir, path) = tmp_db();
@@ -64,11 +97,15 @@ async fn wrong_passphrase_fails() {
     let result = SqliteStore::open(&path, "wrong");
     assert!(
         result.is_err(),
-        "open with wrong passphrase must fail, got Ok"
+        "opening with a wrong passphrase must fail, got Ok"
     );
 }
 
+// ---- account ----
 
+/// Account identity keys survive a close/reopen cycle. The `save_account()`
+/// call is required because `account()` returns a shared `Arc<Mutex<_>>`;
+/// mutations are only flushed on `save_account` / `flush` (or `Drop`).
 #[tokio::test]
 async fn account_roundtrip_identity_keys() {
     let (_dir, path) = tmp_db();
@@ -91,6 +128,9 @@ async fn account_roundtrip_identity_keys() {
     assert_eq!(acc.curve25519_public_b64(), curve, "curve25519 preserved");
 }
 
+/// Generated one-time keys survive a restart as part of the account pickle
+/// (even though they are unpublished at save time; the `Account` pickle
+/// includes them).
 #[tokio::test]
 async fn account_mutations_persist_otks() {
     let (_dir, path) = tmp_db();
@@ -108,7 +148,7 @@ async fn account_mutations_persist_otks() {
         store.save_account().await;
         (ed, count)
     };
-    assert_eq!(otk_count, 5, "5 OTK generated");
+    assert_eq!(otk_count, 5, "5 OTKs generated");
 
     let store = SqliteStore::open(&path, "pass").expect("reopen");
     let acc_arc = store.account().await;
@@ -116,6 +156,9 @@ async fn account_mutations_persist_otks() {
     assert_eq!(acc.ed25519_public_b64(), ed, "same account after reopen");
 }
 
+/// `flush()` is a convenience alias for `save_account()`. Verifies that
+/// calling it explicitly before closing works the same way as relying on
+/// `Drop`.
 #[tokio::test]
 async fn account_flush_method_works() {
     let (_dir, path) = tmp_db();
@@ -134,7 +177,9 @@ async fn account_flush_method_works() {
     assert_eq!(ed, ed2);
 }
 
+// ---- cross-signing keys ----
 
+/// Cross-signing keys (MSK, SSK, USK) survive a close/reopen.
 #[tokio::test]
 async fn cross_signing_keys_roundtrip() {
     let (_dir, path) = tmp_db();
@@ -155,6 +200,7 @@ async fn cross_signing_keys_roundtrip() {
     assert_eq!(loaded.usk_pub_b64(), usk_pub, "usk preserved");
 }
 
+/// `cross_signing_keys_clear()` removes the keys from the store.
 #[tokio::test]
 async fn cross_signing_keys_clear_works() {
     let (_dir, path) = tmp_db();
@@ -168,7 +214,10 @@ async fn cross_signing_keys_clear_works() {
     assert!(store.cross_signing_keys().await.is_none());
 }
 
+// ---- olm sessions ----
 
+/// Olm session round-trip: a freshly created outbound session is persisted,
+/// reloaded, and still usable for encryption.
 #[tokio::test]
 async fn olm_session_roundtrip() {
     let (_dir, path) = tmp_db();
@@ -215,9 +264,13 @@ async fn olm_session_roundtrip() {
     assert!(!encrypted.body.is_empty());
     assert!(encrypted.message_type == 0 || encrypted.message_type == 1);
 
+    // Suppress unused-import warning; the helper is referenced by design
+    // for symmetry with other integration tests.
     let _ = decrypt_olm;
 }
 
+/// The store enforces `MAX_OLM_SESSIONS_PER_PEER = 5`: adding a sixth
+/// session drops the oldest.
 #[tokio::test]
 async fn olm_sessions_limited_to_max_5() {
     let (_dir, path) = tmp_db();
@@ -247,7 +300,11 @@ async fn olm_sessions_limited_to_max_5() {
     assert_eq!(sessions.len(), 5, "max 5 sessions per peer");
 }
 
+// ---- megolm sessions ----
 
+/// Megolm outbound session round-trip: the session pickle and the
+/// base64-encoded key both survive a restart, and the reloaded session
+/// produces the same `session_id`.
 #[tokio::test]
 async fn megolm_outbound_roundtrip() {
     let (_dir, path) = tmp_db();
@@ -271,7 +328,8 @@ async fn megolm_outbound_roundtrip() {
     assert_eq!(loaded_key, key, "session_key preserved");
 }
 
-
+/// Megolm inbound session round-trip: a ciphertext produced before the
+/// restart still decrypts after.
 #[tokio::test]
 async fn megolm_inbound_roundtrip() {
     let (_dir, path) = tmp_db();
@@ -307,7 +365,10 @@ async fn megolm_inbound_roundtrip() {
     );
 }
 
+// ---- group policy state ----
 
+/// `GroupDataState` round-trip: the 32-byte key, the `GroupData` contents,
+/// and the blob all survive a restart.
 #[tokio::test]
 async fn group_data_state_roundtrip() {
     let (_dir, path) = tmp_db();
@@ -340,6 +401,7 @@ async fn group_data_state_roundtrip() {
     );
 }
 
+/// `group_data_state_remove()` removes the entry.
 #[tokio::test]
 async fn group_data_state_remove_works() {
     let (_dir, path) = tmp_db();
@@ -363,7 +425,10 @@ async fn group_data_state_remove_works() {
     assert!(store.group_data_state(1).await.is_none());
 }
 
+// ---- in-memory mode ----
 
+/// `open_in_memory` behaves like `open` for a fresh, ephemeral database:
+/// account and cross-signing keys work within the lifetime of the store.
 #[tokio::test]
 async fn open_in_memory_smoke() {
     let store = SqliteStore::open_in_memory("pass").expect("in-memory open");
@@ -379,7 +444,14 @@ async fn open_in_memory_smoke() {
     assert_eq!(loaded.msk_pub_b64(), msk);
 }
 
+// ---- encryption at rest ----
 
+/// The database file is not a plain SQLite file: SQLCipher encrypts the
+/// header, so the file must not begin with the plain `SQLite format 3\0`
+/// magic.
+///
+/// This is the on-disk guarantee: someone who copies `locknet.db` cannot
+/// read it without the passphrase.
 #[tokio::test]
 async fn db_file_is_encrypted_on_disk() {
     let (_dir, path) = tmp_db();

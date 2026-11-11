@@ -1,3 +1,38 @@
+//! SAS (emoji) verification — low-level API.
+//!
+//! Covers `LockNetLowAgent::verification().sas_*()` (the low-level flows
+//! that operate directly on `Event::ToDevice`). For the higher-level flow
+//! via `SecurityHelper` and `HighEvent`, see `tests/high_sas.rs`.
+//!
+//! LockNet uses Matrix *concepts* but its own namespaces:
+//!
+//! - `ln.encryption.key.verification.start`
+//! - `ln.encryption.key.verification.accept`
+//! - `ln.encryption.key.verification.key`
+//! - `ln.encryption.key.verification.mac`
+//!
+//! The handshake:
+//!
+//! 1. Initiator sends `start` via Olm (requires an established Olm session).
+//! 2. Responder replies with `accept` and its ephemeral X25519 public key.
+//! 3. Initiator sends its own public key; both derive 7 emoji via HKDF
+//!    (info = `LOCKNET_ENCRYPTION_KEY_VERIFICATION_SAS_V1 || txid`).
+//! 4. Both sides call `confirm_emoji(true)` and exchange MACs of their
+//!    `ed25519` and `msk` using the SAS secret.
+//! 5. Each side independently recomputes the peer's expected MACs from the
+//!    peer's published keys and compares.
+//!
+//! Requirements for every test in this file:
+//!
+//! - `setup_full()` for each participant (cross-signing + device signature).
+//! - `setup_olm()` between the two sessions.
+//! - The initiator must have the responder's `ed25519` and `msk` cached
+//!   before `confirm_emoji(true)` (via `set_peer_keys`), otherwise MAC
+//!   verification cannot proceed and the call returns `InvalidArgument`.
+//!
+//! Not covered here: `SecurityHelper::sas_*()` (see `tests/high_sas.rs`),
+//! QR (see `tests/qr.rs` / `tests/high_qr.rs`).
+
 mod common;
 
 use std::collections::HashMap;
@@ -9,6 +44,9 @@ use locknet_rcab::models::{CrossSigningKey, CrossSigningKeys, Signatures};
 use locknet_rcab::{Event, LockNetError, LockNetLowAgent};
 use serde_json::Value;
 
+// ---- helpers ----
+
+/// Build the `CrossSigningKeys` payload that the server accepts.
 fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSigningKeys {
     let msk_pub = keys.msk_pub_b64();
     let ssk_pub = keys.ssk_pub_b64();
@@ -33,12 +71,17 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     }
 }
 
+/// Read the local `ed25519` public key of this session.
 async fn own_ed25519(low: &LockNetLowAgent) -> String {
     let acc = low.store().account().await;
     let acc = acc.lock().await;
     acc.ed25519_public_b64()
 }
 
+/// Upload cross-signing keys and self-sign the current session's `ed25519`
+/// with the freshly generated SSK.
+///
+/// Returns the private keys so the test can later sign the peer's MSK.
 async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
     let low = user.low();
     let uid = user.session.user_id;
@@ -63,6 +106,12 @@ async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
     keys
 }
 
+/// Establish an Olm session in both directions.
+///
+/// SAS messages are carried inside Olm (they are ordinary `to_device`
+/// payloads with a JSON body). One direction is enough for Olm to route, but
+/// both directions are needed for the flows below (start goes one way,
+/// accept/key/mac come back).
 async fn setup_olm(
     alice_low: &LockNetLowAgent,
     bob_low: &LockNetLowAgent,
@@ -92,6 +141,12 @@ async fn setup_olm(
     alice_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
 }
 
+/// Query the peer's `ed25519` (by session) and `msk` (by user).
+///
+/// These are the values the responder must feed into `set_peer_keys` so the
+/// responder can recompute the initiator's MACs. The whole point of the MAC
+/// exchange is that the peer's *published* keys match what was used in the
+/// handshake.
 async fn peer_keys(
     observer: &LockNetLowAgent,
     peer_uid: i64,
@@ -121,6 +176,15 @@ async fn peer_keys(
     (ed, msk)
 }
 
+// ---- tests ----
+
+/// Full happy-path SAS flow.
+///
+/// Verifies:
+/// - the emoji match on both sides (7 emoji, same symbols, same order);
+/// - the MAC exchange succeeds when both sides feed correct peer keys into
+///   `set_peer_keys`;
+/// - both flows transition to `SasStep::Verified`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_full_flow_with_peer_verification() {
     let alice = common::register_new("sas_ok_a").await;
@@ -145,10 +209,10 @@ async fn sas_full_flow_with_peer_verification() {
     let (peer_ed_a, peer_msk_a) = peer_keys(&alice_low, bob_uid, bob_sid).await;
     let (peer_ed_b, peer_msk_b) = peer_keys(&bob_low, alice_uid, alice_sid).await;
 
-    assert_eq!(b_ed, peer_ed_a, "Alice должна видеть тот же ed25519 Bob'а");
-    assert_eq!(b_msk, peer_msk_a, "Alice должна видеть тот же MSK Bob'а");
-    assert_eq!(a_ed, peer_ed_b, "Bob должен видеть тот же ed25519 Alice");
-    assert_eq!(a_msk, peer_msk_b, "Bob должен видеть тот же MSK Alice");
+    assert_eq!(b_ed, peer_ed_a, "Alice sees the same ed25519 for Bob's device");
+    assert_eq!(b_msk, peer_msk_a, "Alice sees the same MSK for Bob");
+    assert_eq!(a_ed, peer_ed_b, "Bob sees the same ed25519 for Alice's device");
+    assert_eq!(a_msk, peer_msk_b, "Bob sees the same MSK for Alice");
 
     let mut bob_setup_rx = bob_low.subscribe();
     let mut alice_flow = alice_low
@@ -237,6 +301,12 @@ async fn sas_full_flow_with_peer_verification() {
     b.client.disconnect().await.ok();
 }
 
+/// `confirm_emoji(true)` without a prior `set_peer_keys` returns
+/// `InvalidArgument`. The flow stays in `NeedUserConfirmation`, so the caller
+/// can recover by calling `set_peer_keys` and retrying.
+///
+/// `confirm_emoji(false)` (user rejection) is allowed without peer keys: a
+/// rejection does not need MAC verification.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_confirm_without_peer_keys_fails() {
     let alice = common::register_new("sas_npk_a").await;
@@ -305,6 +375,15 @@ async fn sas_confirm_without_peer_keys_fails() {
     b.client.disconnect().await.ok();
 }
 
+/// When the initiator sets the wrong peer keys (their own instead of the
+/// responder's), the MAC check fails on the initiator side and its flow
+/// transitions to `Cancelled("MAC mismatch")`. The responder still transitions
+/// to `Verified` because *its* peer keys are correct.
+///
+/// This is the asymmetry that catches a MITM on the initiator's side: the
+/// responder confirmed that the initiator owns the keys the initiator
+/// published, but the initiator received a MAC that does not match the
+/// responder's published keys.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_mac_mismatch_cancels() {
     let alice = common::register_new("sas_mm_a").await;
@@ -350,8 +429,10 @@ async fn sas_mac_mismatch_cancels() {
     let _ = alice_flow.next().await.expect("alice next");
     let _ = bob_flow.next().await.expect("bob next");
 
+    // Alice deliberately sets her OWN keys as peer keys.
     alice_flow.set_peer_keys(a_ed.clone(), a_keys.msk_pub_b64());
 
+    // Bob sets the correct peer keys for Alice.
     let (peer_ed_a_for_bob, peer_msk_a_for_bob) = peer_keys(&bob_low, alice_uid, alice_sid).await;
     bob_flow.set_peer_keys(peer_ed_a_for_bob, peer_msk_a_for_bob);
 
@@ -384,6 +465,11 @@ async fn sas_mac_mismatch_cancels() {
     b.client.disconnect().await.ok();
 }
 
+/// User rejection (confirm_emoji(false)) transitions the initiator's flow to
+/// `Cancelled("user rejected")` without any MAC exchange.
+///
+/// The responder is left in `NeedUserConfirmation` (nothing is sent); the
+/// test simply disconnects.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn sas_rejection_cancels() {
     let alice = common::register_new("sas_rej_a").await;

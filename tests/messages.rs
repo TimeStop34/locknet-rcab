@@ -1,11 +1,20 @@
+//! Message sending, fetching, editing, deleting, reactions, and server limits.
+//!
+//! Uses [`common::fake_encrypted`] to bypass real Megolm encryption. This
+//! exercises the server-side routing, rate-limiting, and validation logic
+//! without the overhead of key exchange.
+
 mod common;
 
 use locknet_rcab::{models::Encrypted, Event};
 
+/// Helper for brevity.
 fn fake_enc(session_id: i64, plaintext: &str) -> Encrypted {
     common::fake_encrypted(session_id, plaintext)
 }
 
+/// Basic send + fetch. Asserts that author ID and session ID are preserved
+/// and that the fake ciphertext round-trips correctly.
 #[tokio::test]
 async fn send_and_get_messages() {
     let alice = common::register_new("msg_sg_a").await;
@@ -46,6 +55,7 @@ async fn send_and_get_messages() {
     b.client.disconnect().await.ok();
 }
 
+/// Pagination: `limit=1` on a chat with 3 messages must set `has_more = true`.
 #[tokio::test]
 async fn get_messages_has_more() {
     let alice = common::register_new("msg_hm_a").await;
@@ -77,6 +87,7 @@ async fn get_messages_has_more() {
     b.client.disconnect().await.ok();
 }
 
+/// The receiver must get a `MessageCreate` push with the correct payload.
 #[tokio::test]
 async fn bob_receives_message_create_push() {
     let alice = common::register_new("msg_push_a").await;
@@ -111,6 +122,7 @@ async fn bob_receives_message_create_push() {
     b.client.disconnect().await.ok();
 }
 
+/// The author can edit a message; the receiver gets `MessageUpdate`.
 #[tokio::test]
 async fn edit_by_author_succeeds() {
     let alice = common::register_new("msg_edit_a").await;
@@ -158,6 +170,7 @@ async fn edit_by_author_succeeds() {
     b.client.disconnect().await.ok();
 }
 
+/// Non-authors cannot edit a message (`not_author`).
 #[tokio::test]
 async fn edit_by_non_author_fails() {
     let alice = common::register_new("msg_edna_a").await;
@@ -186,6 +199,8 @@ async fn edit_by_non_author_fails() {
     b.client.disconnect().await.ok();
 }
 
+/// Deletion is a soft-delete: the message remains in history with
+/// `deleted = true` and `encrypted = None`.
 #[tokio::test]
 async fn delete_marks_message_deleted() {
     let alice = common::register_new("msg_del_a").await;
@@ -225,6 +240,9 @@ async fn delete_marks_message_deleted() {
     b.client.disconnect().await.ok();
 }
 
+/// Adding a reaction produces a push and updates the aggregated list; adding
+/// the same reaction twice is idempotent. Removing it deletes the aggregation
+/// entry.
 #[tokio::test]
 async fn reactions_full_flow() {
     let alice = common::register_new("msg_rx_a").await;
@@ -304,6 +322,8 @@ async fn reactions_full_flow() {
     b.client.disconnect().await.ok();
 }
 
+/// The server validates that `sender_session_id` matches the authenticated
+/// session (`session_mismatch`).
 #[tokio::test]
 async fn session_mismatch_fails() {
     let alice = common::register_new("msg_sm_a").await;
@@ -326,6 +346,7 @@ async fn session_mismatch_fails() {
     b.client.disconnect().await.ok();
 }
 
+/// Messages exceeding the server's ciphertext size limit are rejected.
 #[tokio::test]
 async fn message_too_large_fails() {
     let alice = common::register_new("msg_big_a").await;
@@ -351,6 +372,7 @@ async fn message_too_large_fails() {
     b.client.disconnect().await.ok();
 }
 
+/// A user who is not a member of the group cannot send messages to it.
 #[tokio::test]
 async fn not_a_member_cannot_send() {
     let alice = common::register_new("msg_nm_a").await;
@@ -372,6 +394,8 @@ async fn not_a_member_cannot_send() {
     c.client.disconnect().await.ok();
 }
 
+/// The server enforces a per-session rate limit (30 messages per minute by
+/// default). The 31st message must fail with `rate_limited`.
 #[tokio::test]
 async fn rate_limit_hits_after_30_messages() {
     let alice = common::register_new("msg_rl_a").await;

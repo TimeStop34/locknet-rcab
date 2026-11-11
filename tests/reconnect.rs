@@ -1,3 +1,26 @@
+//! Manual reconnect tests.
+//!
+//! `LockNetClient` supports manual reconnect via
+//! [`locknet_rcab::Credentials::Session`] — the caller supplies the refresh
+//! JWT and gets back a live client bound to the same server-side `session_id`.
+//!
+//! This file exercises that path end-to-end. It does **not** exercise the
+//! background runner's automatic reconnect on network failure (see
+//! `src/core/runner.rs`; the unit tests there cover the backoff logic, but
+//! the actual automatic reconnect is exercised by integration tests only
+//! when the server is restarted under load).
+//!
+//! What is verified:
+//!
+//! - Manual reconnect preserves `session_id` and allows sending/reading
+//!   messages immediately.
+//! - Reconnecting with an invalid refresh JWT fails with
+//!   `SessionExpired` / `InvalidCredentials` / `InvalidResponse` — never a
+//!   panic or a hang.
+//! - Offline `message_create` events are drained after reconnect.
+//! - Calling `connection_request` on an already-connected client is
+//!   idempotent (`session_id` unchanged, low-level agent still works).
+
 mod common;
 
 use std::time::Duration;
@@ -6,6 +29,12 @@ use locknet_rcab::{Credentials, Event, LockNetClient, LockNetError};
 
 // ---- manual reconnect ----
 
+/// Disconnect, reconnect via refresh JWT, send a message before and after.
+///
+/// Verifies that:
+/// - `session_id` is preserved across the reconnect;
+/// - both the runner and the high-level agent are running again;
+/// - both messages appear in the peer's history.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn manual_reconnect_preserves_session_and_works() {
     let alice = common::register_new("rc_alice").await;
@@ -60,11 +89,11 @@ async fn manual_reconnect_preserves_session_and_works() {
     let history = bob_chat.messages(None, 20).await.expect("bob history");
     assert!(
         history.iter().any(|m| m.id == ack1.message_id),
-        "msg before reconnect in history"
+        "message from before reconnect is in history"
     );
     assert!(
         history.iter().any(|m| m.id == ack2.message_id),
-        "msg after reconnect in history"
+        "message from after reconnect is in history"
     );
 
     alice2.disconnect().await.ok();
@@ -72,6 +101,8 @@ async fn manual_reconnect_preserves_session_and_works() {
     b.client.disconnect().await.ok();
 }
 
+/// An obviously invalid refresh JWT fails cleanly with one of the auth
+/// error variants (never panics, never hangs).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_with_invalid_refresh_jwt_fails() {
     let mut c = LockNetClient::new(common::test_config());
@@ -93,6 +124,8 @@ async fn reconnect_with_invalid_refresh_jwt_fails() {
     );
 }
 
+/// Bob goes offline; Alice sends two messages; Bob reconnects and
+/// `event_sync` drains both `message_create` pushes.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_drains_offline_events() {
     let alice = common::register_new("rc_drain_a").await;
@@ -161,6 +194,9 @@ async fn reconnect_drains_offline_events() {
     a.client.disconnect().await.ok();
 }
 
+/// Calling `connection_request` on an already-connected client is
+/// idempotent: the previous runner is shut down cleanly, the new one is
+/// started, and `session_id` is unchanged.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn reconnect_idempotent_when_already_connected() {
     let mut alice = common::register_new("rc_idem").await;
