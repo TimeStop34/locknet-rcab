@@ -1,7 +1,7 @@
 //! Device keys, one-time keys, and `query_keys` results.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// `{"<signer_user_id>": {"<signature_type>": "<base64_sig>"}}`.
 pub type SignaturesMap = HashMap<String, HashMap<String, String>>;

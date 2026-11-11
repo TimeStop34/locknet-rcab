@@ -53,7 +53,9 @@ impl QrMode {
             0 => Ok(QrMode::UserToUser),
             1 => Ok(QrMode::SelfDeviceTrusted),
             2 => Ok(QrMode::SelfDeviceUntrusted),
-            other => Err(LockNetError::InvalidArgument(format!("qr: invalid mode {other}"))),
+            other => Err(LockNetError::InvalidArgument(format!(
+                "qr: invalid mode {other}"
+            ))),
         }
     }
 
@@ -150,8 +152,8 @@ impl QrFlow {
         our_msk_b64: String,
         our_ed25519_b64: String,
     ) -> Result<(QrCode, QrFlow)> {
-        let txid = generate_txid();
-        let (raw, eph_secret, secret) = qr_generate(mode, &txid);
+        let txid = generate_txid()?;
+        let (raw, eph_secret, secret) = qr_generate(mode, &txid)?;
 
         let code = QrCode {
             mode,
@@ -199,8 +201,7 @@ impl QrFlow {
     ) -> Result<QrFlow> {
         let (mode, txid, peer_eph_pub, secret) = qr_parse(qr_raw)?;
 
-        let mut sk_bytes = [0u8; 32];
-        getrandom::getrandom(&mut sk_bytes).expect("getrandom");
+        let sk_bytes = crate::core::crypto::random::random_bytes::<32>()?;
         let our_eph_secret = StaticSecret::from(sk_bytes);
         let our_eph_pub = PublicKey::from(&our_eph_secret);
 
@@ -230,13 +231,19 @@ impl QrFlow {
     }
 
     /// Transaction ID of this flow.
-    pub fn transaction_id(&self) -> &str { &self.txid }
+    pub fn transaction_id(&self) -> &str {
+        &self.txid
+    }
 
     /// Verification mode.
-    pub fn mode(&self) -> QrMode { self.mode }
+    pub fn mode(&self) -> QrMode {
+        self.mode
+    }
 
     /// Derived MAC key, once the handshake is complete.
-    pub fn mac_key(&self) -> Option<&[u8; 32]> { self.mac_key.as_ref() }
+    pub fn mac_key(&self) -> Option<&[u8; 32]> {
+        self.mac_key.as_ref()
+    }
 
     /// Drive the flow one step forward.
     ///
@@ -265,7 +272,9 @@ impl QrFlow {
                 let peer_pub_b64 = content
                     .get("public_key")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| LockNetError::InvalidResponse("qr.scanned: no public_key".into()))?
+                    .ok_or_else(|| {
+                        LockNetError::InvalidResponse("qr.scanned: no public_key".into())
+                    })?
                     .to_string();
                 let peer_secret_b64 = content
                     .get("secret")
@@ -365,11 +374,20 @@ impl QrFlow {
             .and_then(|v| v.as_str())
             .ok_or_else(|| LockNetError::InvalidResponse("qr.mac: no mac".into()))?;
 
+        use subtle::ConstantTimeEq;
+
         let peer_key_bytes = decode_b64(&peer_key_b64)?;
         let expected_mac = compute_hmac(&mac_key, &peer_key_bytes)?;
         let their_mac_bytes = decode_b64(their_mac_b64)?;
 
-        if their_mac_bytes != expected_mac {
+        if their_mac_bytes.len() != expected_mac.len() {
+            self.state = InternalState::Cancelled("MAC mismatch".into());
+            return Ok(QrStep::Cancelled("MAC mismatch".into()));
+        }
+
+        // Constant-time comparison.
+        let macs_equal: bool = their_mac_bytes.ct_eq(&expected_mac).into();
+        if !macs_equal {
             self.state = InternalState::Cancelled("MAC mismatch".into());
             return Ok(QrStep::Cancelled("MAC mismatch".into()));
         }
@@ -380,7 +398,10 @@ impl QrFlow {
 
     /// Cancel the flow locally.
     pub async fn cancel(&mut self) -> Result<()> {
-        if matches!(self.state, InternalState::Done | InternalState::Cancelled(_)) {
+        if matches!(
+            self.state,
+            InternalState::Done | InternalState::Cancelled(_)
+        ) {
             return Ok(());
         }
         self.state = InternalState::Cancelled("cancelled by user".into());
@@ -403,7 +424,10 @@ impl QrFlow {
 
     async fn send_qr_message(&self, kind: &str, content: Value) -> Result<()> {
         let pt = json!({ "type": kind, "content": content }).to_string();
-        self.olm.send(self.to_user, self.to_session, pt).wait().await
+        self.olm
+            .send(self.to_user, self.to_session, pt)
+            .wait()
+            .await
     }
 
     async fn wait_for_qr(&mut self, expected_type: &str) -> Result<Value> {
@@ -437,14 +461,12 @@ impl QrFlow {
     }
 }
 
-fn qr_generate(mode: QrMode, txid: &str) -> (String, StaticSecret, [u8; 8]) {
-    let mut sk_bytes = [0u8; 32];
-    getrandom::getrandom(&mut sk_bytes).expect("getrandom");
+fn qr_generate(mode: QrMode, txid: &str) -> Result<(String, StaticSecret, [u8; 8])> {
+    let sk_bytes = crate::core::crypto::random::random_bytes::<32>()?;
     let eph_secret = StaticSecret::from(sk_bytes);
     let eph_pub = PublicKey::from(&eph_secret);
 
-    let mut secret = [0u8; 8];
-    getrandom::getrandom(&mut secret).expect("getrandom");
+    let secret = crate::core::crypto::random::random_bytes::<8>()?;
 
     let raw = format!(
         "{};{};{};{};{};{}",
@@ -456,7 +478,7 @@ fn qr_generate(mode: QrMode, txid: &str) -> (String, StaticSecret, [u8; 8]) {
         b64_no_pad(&secret),
     );
 
-    (raw, eph_secret, secret)
+    Ok((raw, eph_secret, secret))
 }
 
 fn qr_parse(raw: &str) -> Result<(QrMode, String, PublicKey, [u8; 8])> {
@@ -538,8 +560,6 @@ fn decode_b64(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| LockNetError::InvalidResponse(format!("b64: {e}")))
 }
 
-fn generate_txid() -> String {
-    let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes).expect("getrandom");
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+fn generate_txid() -> Result<String> {
+    crate::core::crypto::random::random_txid()
 }

@@ -28,17 +28,17 @@
 //! agent on first call and returns the cached `Arc` thereafter. Applications
 //! that only use the low-level API never pay for the agent's background task.
 
-use std::sync::Arc;
-use tokio::sync::{broadcast, RwLock};
-use tokio::task::JoinHandle;
-use crate::api::low::agent::LockNetLowAgent;
-use crate::api::low::event::Event as LowEvent;
-use crate::core::errors::{LockNetError, Result};
-use crate::core::policies::{HistoryVisibility, MegolmRotationVisibility};
 use super::event::HighEvent;
 use super::models::{Chat, Group, Invite, Message, Reaction, User};
 use super::security::SecurityHelper;
 use super::state::{ClientState, PendingSasStart};
+use crate::api::low::agent::LockNetLowAgent;
+use crate::api::low::event::Event as LowEvent;
+use crate::core::errors::{LockNetError, Result};
+use crate::core::policies::{HistoryVisibility, MegolmRotationVisibility};
+use std::sync::Arc;
+use tokio::sync::{broadcast, RwLock};
+use tokio::task::JoinHandle;
 
 /// Stateful, object-oriented LockNet agent.
 ///
@@ -87,14 +87,21 @@ impl LockNetAgent {
     /// [`crate::LockNetClient::get_agent`]; not part of the public API.
     pub(crate) fn new(low: Arc<LockNetLowAgent>) -> Self {
         let (event_tx, _) = broadcast::channel(1024);
-        let state = Arc::new(RwLock::new(ClientState::new(low.user_id(), low.session_id())));
+        let state = Arc::new(RwLock::new(ClientState::new(
+            low.user_id(),
+            low.session_id(),
+        )));
         let security = Arc::new(SecurityHelper {
             low: low.clone(),
             state: state.clone(),
             event_tx: event_tx.clone(),
         });
         let mut agent = Self {
-            low, state, event_tx, security, process_handle: None,
+            low,
+            state,
+            event_tx,
+            security,
+            process_handle: None,
         };
         agent.start_process();
         agent
@@ -135,10 +142,14 @@ impl LockNetAgent {
     // ---- identity ----
 
     /// Server-side user ID of the authenticated user.
-    pub fn user_id(&self) -> i64 { self.low.user_id() }
+    pub fn user_id(&self) -> i64 {
+        self.low.user_id()
+    }
 
     /// Server-side session ID of the current device.
-    pub fn session_id(&self) -> i64 { self.low.session_id() }
+    pub fn session_id(&self) -> i64 {
+        self.low.session_id()
+    }
 
     /// Resolve the current user from the local cache, inserting a placeholder
     /// if not yet cached.
@@ -176,7 +187,15 @@ impl LockNetAgent {
         };
         st.groups
             .values()
-            .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone(), self.security.clone()))
+            .map(|g| {
+                Chat::new(
+                    self.low.clone(),
+                    g.clone(),
+                    self.state.clone(),
+                    self.event_tx.clone(),
+                    self.security.clone(),
+                )
+            })
             .collect()
     }
 
@@ -200,7 +219,13 @@ impl LockNetAgent {
                 st.groups.insert(g.id, g.clone());
                 g
             };
-            out.push(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()));
+            out.push(Chat::new(
+                self.low.clone(),
+                g,
+                self.state.clone(),
+                self.event_tx.clone(),
+                self.security.clone(),
+            ));
         }
         Ok(out)
     }
@@ -226,14 +251,26 @@ impl LockNetAgent {
             st.groups.insert(g.id, g.clone());
             g
         };
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
+        Ok(Chat::new(
+            self.low.clone(),
+            g,
+            self.state.clone(),
+            self.event_tx.clone(),
+            self.security.clone(),
+        ))
     }
 
     fn cached_chat(&self, chat_id: i64) -> Option<Chat> {
         let st = self.state.try_read().ok()?;
-        st.groups
-            .get(&chat_id)
-            .map(|g| Chat::new(self.low.clone(), g.clone(), self.state.clone(), self.event_tx.clone(), self.security.clone()))
+        st.groups.get(&chat_id).map(|g| {
+            Chat::new(
+                self.low.clone(),
+                g.clone(),
+                self.state.clone(),
+                self.event_tx.clone(),
+                self.security.clone(),
+            )
+        })
     }
 
     // ---- group management ----
@@ -256,7 +293,13 @@ impl LockNetAgent {
             st.groups.insert(g.id, g.clone());
             g
         };
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
+        Ok(Chat::new(
+            self.low.clone(),
+            g,
+            self.state.clone(),
+            self.event_tx.clone(),
+            self.security.clone(),
+        ))
     }
 
     /// Create a group.
@@ -293,7 +336,13 @@ impl LockNetAgent {
             st.groups.insert(g.id, g.clone());
             g
         };
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
+        Ok(Chat::new(
+            self.low.clone(),
+            g,
+            self.state.clone(),
+            self.event_tx.clone(),
+            self.security.clone(),
+        ))
     }
 
     /// Join a public group by its `public_id`.
@@ -311,7 +360,13 @@ impl LockNetAgent {
             st.groups.insert(g.id, g.clone());
             g
         };
-        Ok(Chat::new(self.low.clone(), g, self.state.clone(), self.event_tx.clone(), self.security.clone()))
+        Ok(Chat::new(
+            self.low.clone(),
+            g,
+            self.state.clone(),
+            self.event_tx.clone(),
+            self.security.clone(),
+        ))
     }
 
     /// Leave a group.
@@ -374,9 +429,12 @@ impl LockNetAgent {
             None => {
                 let _ = self.invites().await?;
                 let st = self.state.read().await;
-                st.invites.get(&invite_id).map(|i| i.group.id).ok_or_else(|| {
-                    LockNetError::InvalidArgument(format!("invite {invite_id} not found"))
-                })?
+                st.invites
+                    .get(&invite_id)
+                    .map(|i| i.group.id)
+                    .ok_or_else(|| {
+                        LockNetError::InvalidArgument(format!("invite {invite_id} not found"))
+                    })?
             }
         };
 
@@ -434,13 +492,17 @@ impl LockNetAgent {
     /// slow subscribers once the internal buffer (1024) is full — callers
     /// should drain the channel promptly or handle
     /// [`tokio::sync::broadcast::error::RecvError::Lagged`].
-    pub fn subscribe(&self) -> broadcast::Receiver<HighEvent> { self.event_tx.subscribe() }
+    pub fn subscribe(&self) -> broadcast::Receiver<HighEvent> {
+        self.event_tx.subscribe()
+    }
 
     /// The trust/verification helper.
     ///
     /// See [`SecurityHelper`] for cross-signing setup, SAS / QR flows, and
     /// key backup.
-    pub fn security(&self) -> Arc<SecurityHelper> { self.security.clone() }
+    pub fn security(&self) -> Arc<SecurityHelper> {
+        self.security.clone()
+    }
 
     /// Escape hatch to the low-level agent.
     ///
@@ -449,7 +511,9 @@ impl LockNetAgent {
     /// required. **Do not** call low-level decryptors (`olm.decrypt`,
     /// `key_sharing.request`, SAS/QR flows from `api::low`) while the agent is
     /// active — they would race for the stateful Olm session.
-    pub fn low(&self) -> Arc<LockNetLowAgent> { self.low.clone() }
+    pub fn low(&self) -> Arc<LockNetLowAgent> {
+        self.low.clone()
+    }
 }
 
 /// Build a minimal [`Group`] placeholder for a chat that is not yet cached.
@@ -554,6 +618,7 @@ async fn resolve_user_by_session(
 ///
 /// Runs in a detached task (spawned by [`process_event`]) so that a slow
 /// responder does not block the event loop.
+#[tracing::instrument(skip(low, state, event_tx, have), fields(txid = %txid))]
 async fn respond_key_request(
     low: &Arc<LockNetLowAgent>,
     state: &Arc<RwLock<ClientState>>,
@@ -566,7 +631,10 @@ async fn respond_key_request(
     let sender_user = match resolve_user_by_session(low, &chat_ids, sender_session).await {
         Some(u) => u,
         None => {
-            tracing::warn!(sender_session, "key_request: cannot resolve user_id, ignoring");
+            tracing::warn!(
+                sender_session,
+                "key_request: cannot resolve user_id, ignoring"
+            );
             return;
         }
     };
@@ -581,7 +649,10 @@ async fn respond_key_request(
     let mut has_after_join = false;
 
     for chat_id in &chat_ids {
-        let history_vis = low.store().group_data_state(*chat_id).await
+        let history_vis = low
+            .store()
+            .group_data_state(*chat_id)
+            .await
             .map(|s| s.data.history_visibility)
             .unwrap_or(HistoryVisibility::AfterJoin);
 
@@ -592,10 +663,14 @@ async fn respond_key_request(
 
         let allowed = match history_vis {
             HistoryVisibility::AllVerifiedSessions => {
-                security.is_session_verified(sender_user, sender_session).await
+                security
+                    .is_session_verified(sender_user, sender_session)
+                    .await
             }
             HistoryVisibility::AllVerifiedUsers => {
-                security.is_session_verified(sender_user, sender_session).await
+                security
+                    .is_session_verified(sender_user, sender_session)
+                    .await
                     && security.is_user_verified(sender_user).await
             }
             _ => false,
@@ -785,6 +860,11 @@ async fn process_event(
 ) -> Result<()> {
     match evt {
         LowEvent::MessageCreate(mc) => {
+            tracing::trace!(
+                chat_id = mc.chat_id,
+                message_id = mc.message_id,
+                "message_create"
+            );
             let text = decrypt_text(low, mc.chat_id, &mc.encrypted).await;
 
             let mut st = state.write().await;
@@ -793,15 +873,34 @@ async fn process_event(
             let chat = st
                 .groups
                 .get(&mc.chat_id)
-                .map(|g| Chat::new(low.clone(), g.clone(), state.clone(), event_tx.clone(), security.clone()))
+                .map(|g| {
+                    Chat::new(
+                        low.clone(),
+                        g.clone(),
+                        state.clone(),
+                        event_tx.clone(),
+                        security.clone(),
+                    )
+                })
                 .unwrap_or_else(|| {
-                    Chat::new(low.clone(), stub_group(mc.chat_id), state.clone(), event_tx.clone(), security.clone())
+                    Chat::new(
+                        low.clone(),
+                        stub_group(mc.chat_id),
+                        state.clone(),
+                        event_tx.clone(),
+                        security.clone(),
+                    )
                 });
             drop(st);
 
             let _ = event_tx.send(HighEvent::NewMessage { chat, message: msg });
         }
         LowEvent::MessageUpdate(u) => {
+            tracing::trace!(
+                chat_id = u.chat_id,
+                message_id = u.message_id,
+                "message_update"
+            );
             let text = decrypt_text(low, u.chat_id, &u.encrypted).await;
 
             let mut st = state.write().await;
@@ -818,9 +917,23 @@ async fn process_event(
             let chat = st
                 .groups
                 .get(&u.chat_id)
-                .map(|g| Chat::new(low.clone(), g.clone(), state.clone(), event_tx.clone(), security.clone()))
+                .map(|g| {
+                    Chat::new(
+                        low.clone(),
+                        g.clone(),
+                        state.clone(),
+                        event_tx.clone(),
+                        security.clone(),
+                    )
+                })
                 .unwrap_or_else(|| {
-                    Chat::new(low.clone(), stub_group(u.chat_id), state.clone(), event_tx.clone(), security.clone())
+                    Chat::new(
+                        low.clone(),
+                        stub_group(u.chat_id),
+                        state.clone(),
+                        event_tx.clone(),
+                        security.clone(),
+                    )
                 });
             drop(st);
 
@@ -829,6 +942,11 @@ async fn process_event(
             }
         }
         LowEvent::MessageDelete(d) => {
+            tracing::trace!(
+                chat_id = d.chat_id,
+                message_id = d.message_id,
+                "message_delete"
+            );
             let mut st = state.write().await;
             if let Some(m) = st.messages.get_mut(&d.message_id) {
                 m.deleted = true;
@@ -842,6 +960,12 @@ async fn process_event(
             });
         }
         LowEvent::ReactionAdd(r) => {
+            tracing::trace!(
+                chat_id = r.chat_id,
+                message_id = r.message_id,
+                user_id = r.user_id,
+                "reaction_add"
+            );
             let mut st = state.write().await;
             let user = st.resolve_user(r.user_id);
             if let Some(m) = st.messages.get_mut(&r.message_id) {
@@ -867,6 +991,12 @@ async fn process_event(
             });
         }
         LowEvent::ReactionRemove(r) => {
+            tracing::trace!(
+                chat_id = r.chat_id,
+                message_id = r.message_id,
+                user_id = r.user_id,
+                "reaction_remove"
+            );
             let mut st = state.write().await;
             let user = st.resolve_user(r.user_id);
             if let Some(m) = st.messages.get_mut(&r.message_id) {
@@ -888,6 +1018,7 @@ async fn process_event(
             });
         }
         LowEvent::GroupCreated(gc) => {
+            tracing::trace!(chat_id = gc.group.id, "group_created");
             let g = {
                 let mut st = state.write().await;
                 let g = st.group_to_domain(&gc.group, low).await;
@@ -897,6 +1028,11 @@ async fn process_event(
             let _ = event_tx.send(HighEvent::GroupCreated { group: g });
         }
         LowEvent::GroupInviteCreated(gi) => {
+            tracing::trace!(
+                chat_id = gi.group_id,
+                invite_id = gi.invite_id,
+                "group_invite_created"
+            );
             let mut st = state.write().await;
             let inv = st.invite_from_push(&gi);
             st.invites.insert(inv.id, inv.clone());
@@ -904,6 +1040,7 @@ async fn process_event(
             let _ = event_tx.send(HighEvent::InviteReceived { invite: inv });
         }
         LowEvent::GroupMembershipChanged(mc) => {
+            tracing::trace!(chat_id = mc.group_id, user_id = mc.user_id, change = ?mc.change, "group_membership_changed");
             let user = {
                 let mut st = state.write().await;
                 let u = st.resolve_user(mc.user_id);
@@ -922,16 +1059,16 @@ async fn process_event(
                             .map(|list| list.iter().map(|m| m.user_id).collect())
                             .unwrap_or_default();
 
-                        if matches!(
-                            mc.change,
-                            crate::api::low::models::MembershipChange::Left
-                        ) {
+                        if matches!(mc.change, crate::api::low::models::MembershipChange::Left) {
                             participant_ids.retain(|uid| *uid != mc.user_id);
                         }
 
                         if !participant_ids.is_empty() {
                             if let Ok(info) = low.megolm().rotate(mc.group_id).await {
-                                let policy = low.store().group_data_state(mc.group_id).await
+                                let policy = low
+                                    .store()
+                                    .group_data_state(mc.group_id)
+                                    .await
                                     .map(|s| s.data.megolm_rotation_visibility)
                                     .unwrap_or(MegolmRotationVisibility::OnlyVerifiedUsers);
                                 if let Err(e) = crate::api::high::group_key::fan_out_group_key(
@@ -949,9 +1086,14 @@ async fn process_event(
 
                                 if let Ok(fresh) = low.groups().info(mc.group_id).await {
                                     if fresh.created_by == low.user_id() {
-                                        if let Some(state_gd) = low.store().group_data_state(mc.group_id).await {
-                                            if fresh.encrypted_group_data.as_deref() != Some(state_gd.blob.as_str()) {
-                                                let _ = low.groups()
+                                        if let Some(state_gd) =
+                                            low.store().group_data_state(mc.group_id).await
+                                        {
+                                            if fresh.encrypted_group_data.as_deref()
+                                                != Some(state_gd.blob.as_str())
+                                            {
+                                                let _ = low
+                                                    .groups()
                                                     .update_group_data(mc.group_id, &state_gd.blob)
                                                     .await;
                                             }
@@ -976,6 +1118,7 @@ async fn process_event(
             });
         }
         LowEvent::GroupDataUpdated { group_id } => {
+            tracing::trace!(chat_id = group_id, "group_data_updated");
             if let Ok(dto) = low.groups().info(group_id).await {
                 let g = {
                     let mut st = state.write().await;
@@ -990,6 +1133,11 @@ async fn process_event(
             }
         }
         LowEvent::ToDevice(payload) => {
+            tracing::trace!(
+                sender_session = payload.sender_session_id,
+                sender_key = %payload.sender_key,
+                "to_device"
+            );
             let sender_session = payload.sender_session_id;
             if let Ok(Some(pt)) = low.olm().decrypt(payload).wait().await {
                 if let Ok(val) = serde_json::from_str::<serde_json::Value>(&pt) {
@@ -1000,9 +1148,7 @@ async fn process_event(
                                 .pointer("/content/transaction_id")
                                 .and_then(|v| v.as_str())
                                 .map(String::from);
-                            let chat_id = val
-                                .pointer("/content/chat_id")
-                                .and_then(|v| v.as_i64());
+                            let chat_id = val.pointer("/content/chat_id").and_then(|v| v.as_i64());
                             let megolm_id = val
                                 .pointer("/content/megolm_session_id")
                                 .and_then(|v| v.as_str())
@@ -1133,16 +1279,84 @@ async fn process_event(
             }
         }
         LowEvent::CrossSigningReset(r) => {
-            let mut st = state.write().await;
-            st.verified_users.remove(&r.user_id);
-            st.invalidate_trust_graph();
-            drop(st);
+            tracing::trace!(user_id = r.user_id, "cross_signing_reset");
+            // 1. Cleanup local trust state, collect affected private chats.
+            let affected_chats: Vec<i64> = {
+                let mut st = state.write().await;
+                st.verified_users.remove(&r.user_id);
+                // Drop every session of this user from the verified-set —
+                // otherwise `is_session_verified` would keep returning stale
+                // `true` from cache, and `OnlyVerifiedSessions` fan-out would
+                // continue delivering new keys to the compromised device.
+                st.verified_sessions.retain(|_, uid| *uid != r.user_id);
+                st.invalidate_trust_graph();
+                st.groups
+                    .values()
+                    .filter(|g| !g.is_public && g.members.iter().any(|m| m.user.id == r.user_id))
+                    .map(|g| g.id)
+                    .collect()
+            };
+
+            // 2. For chats where the reset user was a member and the policy
+            //    gates keys by verification, rotate Megolm and re-fan-out.
+            //    Under a compromised device, the old session key is known to
+            //    the attacker; without rotation, they'd keep decrypting new
+            //    messages even after the reset.
+            for chat_id in affected_chats {
+                let Some(policy_state) = low.store().group_data_state(chat_id).await else {
+                    // No policy blob locally — cannot rotate safely (we don't
+                    // know the current visibility rules).
+                    continue;
+                };
+                let policy = policy_state.data.megolm_rotation_visibility;
+                if !matches!(
+                    policy,
+                    MegolmRotationVisibility::OnlyVerifiedSessions
+                        | MegolmRotationVisibility::OnlyVerifiedUsers
+                ) {
+                    // `AllMembers`: reset does not change who gets keys.
+                    continue;
+                }
+
+                let Ok(info) = low.megolm().rotate(chat_id).await else {
+                    tracing::warn!(chat_id, "cs-reset: megolm rotate failed");
+                    continue;
+                };
+
+                let Ok(dto) = low.groups().info(chat_id).await else {
+                    continue;
+                };
+                let participant_ids: Vec<i64> = dto
+                    .members
+                    .as_ref()
+                    .map(|list| list.iter().map(|m| m.user_id).collect())
+                    .unwrap_or_default();
+                if participant_ids.is_empty() {
+                    continue;
+                }
+
+                if let Err(e) = crate::api::high::group_key::fan_out_group_key(
+                    low,
+                    chat_id,
+                    &participant_ids,
+                    &info,
+                    policy,
+                    security,
+                )
+                .await
+                {
+                    tracing::warn!(?e, chat_id, "cs-reset: fan-out after rotation failed");
+                }
+            }
+
             let _ = event_tx.send(HighEvent::CrossSigningReset { user_id: r.user_id });
         }
         LowEvent::Reconnected => {
+            tracing::trace!("reconnected");
             let _ = event_tx.send(HighEvent::Reconnected);
         }
         LowEvent::SessionExpired => {
+            tracing::trace!("session expired");
             let _ = event_tx.send(HighEvent::SessionExpired);
         }
         LowEvent::CrossSigningSignatureAdded(_) => {

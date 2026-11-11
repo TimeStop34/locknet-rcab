@@ -33,7 +33,11 @@ use std::time::Duration;
 use locknet_rcab::{QrMode, QrStep};
 
 async fn setup_cs(agent: &locknet_rcab::LockNetAgent) {
-    agent.security().setup_cross_signing().await.expect("setup_cross_signing");
+    agent
+        .security()
+        .setup_cross_signing()
+        .await
+        .expect("setup_cross_signing");
 }
 
 /// Mode 0 full flow.
@@ -69,15 +73,9 @@ async fn qr_mode0_user_to_user_full_flow() {
         .expect("bob qr_scan");
     assert_eq!(alice_txid, bob_txid);
 
-    let (d_step, s_step) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                alice_sec.qr_next(&alice_txid),
-                bob_sec.qr_next(&bob_txid),
-            )
-        },
-    )
+    let (d_step, s_step) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(alice_sec.qr_next(&alice_txid), bob_sec.qr_next(&bob_txid),)
+    })
     .await
     .expect("next join timeout");
     let d_step = d_step.expect("disp next");
@@ -85,15 +83,12 @@ async fn qr_mode0_user_to_user_full_flow() {
     assert!(matches!(d_step, QrStep::Confirmed), "disp: {d_step:?}");
     assert!(matches!(s_step, QrStep::Confirmed), "scan: {s_step:?}");
 
-    let (f1, f2) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                alice_sec.qr_exchange_mac(&alice_txid),
-                bob_sec.qr_exchange_mac(&bob_txid),
-            )
-        },
-    )
+    let (f1, f2) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            alice_sec.qr_exchange_mac(&alice_txid),
+            bob_sec.qr_exchange_mac(&bob_txid),
+        )
+    })
     .await
     .expect("exchange_mac join timeout");
 
@@ -145,29 +140,20 @@ async fn qr_mode2_self_device_full_flow() {
         .await
         .expect("bob scan");
 
-    let (d_step, s_step) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                alice_sec.qr_next(&alice_txid),
-                bob_sec.qr_next(&bob_txid),
-            )
-        },
-    )
+    let (d_step, s_step) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(alice_sec.qr_next(&alice_txid), bob_sec.qr_next(&bob_txid),)
+    })
     .await
     .expect("next timeout");
     assert!(matches!(d_step.expect("d"), QrStep::Confirmed));
     assert!(matches!(s_step.expect("s"), QrStep::Confirmed));
 
-    let (f1, f2) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                alice_sec.qr_exchange_mac(&alice_txid),
-                bob_sec.qr_exchange_mac(&bob_txid),
-            )
-        },
-    )
+    let (f1, f2) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            alice_sec.qr_exchange_mac(&alice_txid),
+            bob_sec.qr_exchange_mac(&bob_txid),
+        )
+    })
     .await
     .expect("exchange_mac timeout");
     assert!(matches!(f1.expect("f1"), QrStep::Verified));

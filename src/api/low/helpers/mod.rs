@@ -30,7 +30,9 @@ pub use backup::{BackupExportResult, BackupImportResult, LockNetBackupHelper, Re
 pub use crypto::LockNetCryptoHelper;
 pub use events::LockNetEventsHelper;
 pub use groups::LockNetGroupsHelper;
-pub use key_sharing::{IncomingKeyRequest, KeyRequestFlow, KeyRequestStep, LockNetKeySharingHelper};
+pub use key_sharing::{
+    IncomingKeyRequest, KeyRequestFlow, KeyRequestStep, LockNetKeySharingHelper,
+};
 pub use keys::LockNetKeysHelper;
 pub use megolm::{LockNetMegolmHelper, MegolmSessionInfo};
 pub use messages::LockNetMessagesHelper;

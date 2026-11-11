@@ -42,9 +42,19 @@ pub struct User {
 impl User {
     /// Create a placeholder for a user referenced only by ID.
     pub fn unknown(id: i64) -> Self {
-        Self { id, username: "unknown".into(), display_name: None, avatar_url: None, is_bot: false, verified: false, sessions: Vec::new() }
+        Self {
+            id,
+            username: "unknown".into(),
+            display_name: None,
+            avatar_url: None,
+            is_bot: false,
+            verified: false,
+            sessions: Vec::new(),
+        }
     }
 
     /// Display name if set, otherwise username.
-    pub fn display(&self) -> &str { self.display_name.as_deref().unwrap_or(&self.username) }
+    pub fn display(&self) -> &str {
+        self.display_name.as_deref().unwrap_or(&self.username)
+    }
 }

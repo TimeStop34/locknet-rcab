@@ -32,6 +32,14 @@ const SCHEMA_VERSION: i64 = 2;
 /// protecting it (Keychain, KWallet, Credential Manager, TPM, prompt, etc.)
 /// is the caller's responsibility.
 ///
+/// # Persistence guarantees
+///
+/// Mutations to the [`Account`] (returned by [`CryptoStore::account`]) and to
+/// [`OlmSessionEntry`] entries (returned by [`CryptoStore::olm_sessions`]) are
+/// **not** flushed automatically. Call [`CryptoStore::save_account`] and
+/// [`CryptoStore::olm_persist`] after mutating. [`CryptoStore::save_account`]
+/// is also invoked on `Drop`, best-effort.
+///
 /// # Examples
 ///
 /// ```rust,no_run
@@ -182,7 +190,13 @@ impl SqliteStore {
 
     fn write_account(&self, acc: &Account) {
         let pickle = acc.inner().pickle();
-        let pickle_bytes = serde_json::to_vec(&pickle).expect("account pickle serialize");
+        let pickle_bytes = match serde_json::to_vec(&pickle) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(?e, "failed to serialize account pickle, skipping save");
+                return;
+            }
+        };
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO account (id, pickle) VALUES (1, ?1)",
@@ -197,6 +211,11 @@ impl Drop for SqliteStore {
         if let Some(acc_arc) = self.account_cache.get() {
             if let Ok(acc) = acc_arc.try_lock() {
                 self.write_account(&acc);
+            } else {
+                tracing::warn!(
+                    "SqliteStore dropped while account was locked; \
+                     call flush() before drop to guarantee persistence"
+                );
             }
         }
     }
@@ -238,22 +257,46 @@ impl CryptoStore for SqliteStore {
         self.account_cache
             .get_or_init(|| async {
                 let pickle_bytes: Option<Vec<u8>> = {
-                    let conn = self.conn.lock().expect("conn poisoned");
-                    conn.query_row(
-                        "SELECT pickle FROM account WHERE id = 1",
-                        [],
-                        |r| r.get(0),
-                    )
-                    .optional()
-                    .expect("read account")
+                    // Recover from a poisoned mutex — another thread panicked
+                    // while holding it. The connection itself is still valid;
+                    // the poison flag is just a signal.
+                    let conn = match self.conn.lock() {
+                        Ok(g) => g,
+                        Err(poisoned) => {
+                            tracing::error!(
+                                "conn mutex was poisoned, recovering (data may be inconsistent)"
+                            );
+                            poisoned.into_inner()
+                        }
+                    };
+
+                    match conn
+                        .query_row("SELECT pickle FROM account WHERE id = 1", [], |r| r.get(0))
+                        .optional()
+                    {
+                        Ok(v) => v,
+                        Err(e) => {
+                            // I/O error, DB corruption, etc. Treat as
+                            // "no account"; the caller will see empty logs
+                            // and can recreate by re-running setup.
+                            tracing::error!(?e, "failed to read account pickle from DB");
+                            None
+                        }
+                    }
                 };
 
                 let acc = match pickle_bytes {
-                    Some(bytes) => {
-                        let inner = olm_account_from_pickle_bytes(&bytes)
-                            .expect("valid account pickle in DB");
-                        Account::from_inner(inner)
-                    }
+                    Some(bytes) => match olm_account_from_pickle_bytes(&bytes) {
+                        Some(inner) => Account::from_inner(inner),
+                        None => {
+                            tracing::error!(
+                                "corrupted account pickle in DB, using empty account \
+                                 (identity keys will change — you will need to re-run \
+                                 setup_cross_signing and re-upload device keys)"
+                            );
+                            Account::new()
+                        }
+                    },
                     None => Account::new(),
                 };
 
@@ -310,10 +353,13 @@ impl CryptoStore for SqliteStore {
         let (pickle_bytes, their_curve) = {
             let s = entry.session.lock().await;
             let pickle = s.pickle();
-            (
-                serde_json::to_vec(&pickle).expect("session pickle serialize"),
-                entry.their_curve25519.clone(),
-            )
+            match serde_json::to_vec(&pickle) {
+                Ok(bytes) => (bytes, entry.their_curve25519.clone()),
+                Err(e) => {
+                    tracing::error!(?e, "failed to serialize olm session, skipping save");
+                    return;
+                }
+            }
         };
 
         let conn = match self.conn.lock() {
@@ -401,7 +447,13 @@ impl CryptoStore for SqliteStore {
         let pickle_bytes = {
             let s = session.lock().await;
             let pickle = s.pickle();
-            serde_json::to_vec(&pickle).expect("group session pickle serialize")
+            match serde_json::to_vec(&pickle) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(?e, "failed to serialize group session, skipping save");
+                    return;
+                }
+            }
         };
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
@@ -443,7 +495,16 @@ impl CryptoStore for SqliteStore {
         let pickle_bytes = {
             let s = session.lock().await;
             let pickle = s.pickle();
-            serde_json::to_vec(&pickle).expect("inbound group session pickle serialize")
+            match serde_json::to_vec(&pickle) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(
+                        ?e,
+                        "failed to serialize inbound group session, skipping save"
+                    );
+                    return;
+                }
+            }
         };
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
@@ -473,7 +534,11 @@ impl CryptoStore for SqliteStore {
     async fn cross_signing_keys(&self) -> Option<Arc<CrossSigningKeysPrivate>> {
         let conn = self.conn.lock().ok()?;
         let pickle_bytes: Option<Vec<u8>> = conn
-            .query_row("SELECT pickle FROM cross_signing_keys WHERE id = 1", [], |r| r.get(0))
+            .query_row(
+                "SELECT pickle FROM cross_signing_keys WHERE id = 1",
+                [],
+                |r| r.get(0),
+            )
             .optional()
             .ok()?;
         let bytes = pickle_bytes?;
@@ -491,7 +556,16 @@ impl CryptoStore for SqliteStore {
             ssk: (*keys.ssk).clone(),
             usk: (*keys.usk).clone(),
         };
-        let bytes = serde_json::to_vec(&pickle).expect("cross-signing pickle serialize");
+        let bytes = match serde_json::to_vec(&pickle) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::error!(
+                    ?e,
+                    "failed to serialize cross-signing pickle, skipping save"
+                );
+                return;
+            }
+        };
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
                 "INSERT OR REPLACE INTO cross_signing_keys (id, pickle) VALUES (1, ?1)",
@@ -531,7 +605,10 @@ impl CryptoStore for SqliteStore {
     async fn group_data_state_put(&self, chat_id: i64, state: GroupDataState) {
         let data_json = match serde_json::to_string(&state.data) {
             Ok(s) => s,
-            Err(_) => return,
+            Err(e) => {
+                tracing::error!(?e, "failed to serialize group data, skipping save");
+                return;
+            }
         };
         if let Ok(conn) = self.conn.lock() {
             let _ = conn.execute(
@@ -544,10 +621,7 @@ impl CryptoStore for SqliteStore {
 
     async fn group_data_state_remove(&self, chat_id: i64) {
         if let Ok(conn) = self.conn.lock() {
-            let _ = conn.execute(
-                "DELETE FROM group_data_state WHERE chat_id = ?1",
-                [chat_id],
-            );
+            let _ = conn.execute("DELETE FROM group_data_state WHERE chat_id = ?1", [chat_id]);
         }
     }
 
@@ -580,7 +654,12 @@ impl CryptoStore for SqliteStore {
                 "INSERT OR REPLACE INTO megolm_outbound_meta \
                  (chat_id, session_id, created_at, messages_sent) \
                  VALUES (?1, ?2, ?3, ?4)",
-                params![chat_id, meta.session_id, created_at, meta.messages_sent as i64],
+                params![
+                    chat_id,
+                    meta.session_id,
+                    created_at,
+                    meta.messages_sent as i64
+                ],
             );
         }
     }
@@ -600,11 +679,14 @@ impl CryptoStore for SqliteStore {
         for (idx, entry) in entries.iter().enumerate() {
             let s = entry.session.lock().await;
             let pickle = s.pickle();
-            prepared.push((
-                idx as i64,
-                serde_json::to_vec(&pickle).expect("olm session pickle serialize"),
-                entry.their_curve25519.clone(),
-            ));
+            let bytes = match serde_json::to_vec(&pickle) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::error!(?e, "failed to serialize olm session, skipping save");
+                    return;
+                }
+            };
+            prepared.push((idx as i64, bytes, entry.their_curve25519.clone()));
         }
 
         let conn = match self.conn.lock() {

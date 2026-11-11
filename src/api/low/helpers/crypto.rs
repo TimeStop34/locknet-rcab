@@ -1,16 +1,18 @@
 //! Cross-signing and `send_to_device` helper.
 
-use serde_json::json;
 use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
+use serde_json::json;
 
 /// Wraps the `/api/v1/crypto` WebSocket methods.
 ///
 /// Obtained via [`crate::LockNetLowAgent::crypto`]. Most applications should
 /// use [`crate::SecurityHelper`] instead, which orchestrates these calls
 /// together with the local [`crate::CryptoStore`].
-pub struct LockNetCryptoHelper { pub(crate) cmd_tx: CmdSender }
+pub struct LockNetCryptoHelper {
+    pub(crate) cmd_tx: CmdSender,
+}
 
 impl LockNetCryptoHelper {
     /// Upload the user's cross-signing keys (MSK, SSK, USK).
@@ -61,7 +63,11 @@ impl LockNetCryptoHelper {
     /// Users who have not uploaded cross-signing keys are absent from the
     /// result.
     pub async fn query_cross_signing_keys(&self, user_ids: Vec<i64>) -> Result<CrossSigningQuery> {
-        dispatch(&self.cmd_tx, json!({ "type": "query_cross_signing_keys", "data": { "user_ids": user_ids } })).await
+        dispatch(
+            &self.cmd_tx,
+            json!({ "type": "query_cross_signing_keys", "data": { "user_ids": user_ids } }),
+        )
+        .await
     }
 
     /// Reset the user's cross-signing keys.
@@ -78,8 +84,15 @@ impl LockNetCryptoHelper {
     /// # Errors
     ///
     /// - [`crate::LockNetError::Server`] with code `invalid_password`.
-    pub async fn reset_cross_signing_keys(&self, password: impl Into<String>) -> Result<ResetResult> {
-        dispatch(&self.cmd_tx, json!({ "type": "reset_cross_signing_keys", "data": { "password": password.into() } })).await
+    pub async fn reset_cross_signing_keys(
+        &self,
+        password: impl Into<String>,
+    ) -> Result<ResetResult> {
+        dispatch(
+            &self.cmd_tx,
+            json!({ "type": "reset_cross_signing_keys", "data": { "password": password.into() } }),
+        )
+        .await
     }
 
     /// Send encrypted payloads to specific devices.
@@ -93,6 +106,10 @@ impl LockNetCryptoHelper {
     ///
     /// - [`crate::LockNetError::Timeout`] if the request times out.
     pub async fn send_to_device(&self, messages: ToDeviceMessages) -> Result<ToDeviceAck> {
-        dispatch(&self.cmd_tx, json!({ "type": "send_to_device", "data": { "messages": messages } })).await
+        dispatch(
+            &self.cmd_tx,
+            json!({ "type": "send_to_device", "data": { "messages": messages } }),
+        )
+        .await
     }
 }

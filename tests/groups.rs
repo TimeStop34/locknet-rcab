@@ -22,7 +22,10 @@ async fn create_group_only_creator_is_member() {
         .await
         .expect("create_group");
 
-    assert_eq!(group.member_count, 1, "creator is the only member until accept");
+    assert_eq!(
+        group.member_count, 1,
+        "creator is the only member until accept"
+    );
     assert_eq!(group.created_by, alice.session.user_id);
     assert!(!group.is_public);
     assert!(group.public_id.is_none());
@@ -98,7 +101,11 @@ async fn accept_invite_twice_fails() {
     let invites = bob_low.groups().invites().await.expect("invites");
     let inv = invites.iter().find(|i| i.group_id == group.id).unwrap();
 
-    bob_low.groups().accept_invite(inv.id).await.expect("accept #1");
+    bob_low
+        .groups()
+        .accept_invite(inv.id)
+        .await
+        .expect("accept #1");
     let err = bob_low.groups().accept_invite(inv.id).await.unwrap_err();
     common::assert_server_code(err, "invite_not_found");
 
@@ -126,7 +133,11 @@ async fn decline_invite_works() {
     let invites = bob_low.groups().invites().await.expect("invites");
     let inv = invites.iter().find(|i| i.group_id == group.id).unwrap();
 
-    bob_low.groups().decline_invite(inv.id).await.expect("decline");
+    bob_low
+        .groups()
+        .decline_invite(inv.id)
+        .await
+        .expect("decline");
 
     let err = bob_low.groups().accept_invite(inv.id).await.unwrap_err();
     common::assert_server_code(err, "invite_not_found");
@@ -184,9 +195,17 @@ async fn creator_leave_deletes_group() {
         .expect("create");
 
     let invites = bob_low.groups().invites().await.expect("invites");
-    let inv = invites.iter().find(|i| i.group_id == group.id).unwrap().clone();
+    let inv = invites
+        .iter()
+        .find(|i| i.group_id == group.id)
+        .unwrap()
+        .clone();
 
-    alice_low.groups().leave(group.id).await.expect("alice leave");
+    alice_low
+        .groups()
+        .leave(group.id)
+        .await
+        .expect("alice leave");
 
     let err = alice_low.groups().info(group.id).await.unwrap_err();
     common::assert_server_code(err, "group_not_found");
@@ -221,8 +240,16 @@ async fn create_direct_creates_private_group() {
     assert_eq!(direct.created_by, alice.session.user_id);
 
     let invites = bob_low.groups().invites().await.expect("invites");
-    let inv = invites.iter().find(|i| i.group_id == direct.id).unwrap().clone();
-    bob_low.groups().accept_invite(inv.id).await.expect("accept direct");
+    let inv = invites
+        .iter()
+        .find(|i| i.group_id == direct.id)
+        .unwrap()
+        .clone();
+    bob_low
+        .groups()
+        .accept_invite(inv.id)
+        .await
+        .expect("accept direct");
 
     let info = alice_low.groups().info(direct.id).await.expect("info");
     assert_eq!(info.member_count, 2);
@@ -253,11 +280,22 @@ async fn public_group_join_and_already_member() {
     assert!(group.is_public);
     assert_eq!(group.public_id.as_deref(), Some(public_id.as_str()));
 
-    let seen = bob_low.groups().info(group.id).await.expect("info by non-member");
-    assert!(seen.members.is_none(), "non-member must not see member list");
+    let seen = bob_low
+        .groups()
+        .info(group.id)
+        .await
+        .expect("info by non-member");
+    assert!(
+        seen.members.is_none(),
+        "non-member must not see member list"
+    );
     assert_eq!(seen.member_count, 1);
 
-    let joined = bob_low.groups().join(public_id.clone()).await.expect("join");
+    let joined = bob_low
+        .groups()
+        .join(public_id.clone())
+        .await
+        .expect("join");
     assert_eq!(joined.id, group.id);
 
     let err = bob_low.groups().join(public_id.clone()).await.unwrap_err();

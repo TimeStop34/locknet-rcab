@@ -47,9 +47,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let space = env::var("LOCKNET_SPACE").unwrap_or_else(|_| "localhost:8000".into());
 
     let db_path = env::var("LOCKNET_DB_PATH").unwrap_or_else(|_| "./locknet-persistent.db".into());
-    let db_pass = env::var("LOCKNET_DB_PASSPHRASE").map_err(|_| {
-        "LOCKNET_DB_PASSPHRASE is required (the SQLite file is encrypted with it)"
-    })?;
+    let db_pass = env::var("LOCKNET_DB_PASSPHRASE")
+        .map_err(|_| "LOCKNET_DB_PASSPHRASE is required (the SQLite file is encrypted with it)")?;
 
     let mut cfg = LockNetConfig::new(&url, &space)?;
     cfg.accept_invalid_certs = true;

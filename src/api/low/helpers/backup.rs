@@ -4,11 +4,11 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use base64::Engine;
+use crypto_secretbox::aead::{generic_array::GenericArray, Aead};
+use crypto_secretbox::{KeyInit, XSalsa20Poly1305};
 use hkdf::Hkdf;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use crypto_secretbox::aead::{generic_array::GenericArray, Aead};
-use crypto_secretbox::{KeyInit, XSalsa20Poly1305};
 
 use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::helpers::megolm::LockNetMegolmHelper;
@@ -29,7 +29,7 @@ const BACKUP_HKDF_INFO: &[u8] = b"LOCKNET_ENCRYPTION_BACKUP_V1";
 /// ```rust
 /// use locknet_rcab::RecoveryKey;
 ///
-/// let key = RecoveryKey::generate();
+/// let key = RecoveryKey::generate().unwrap();
 /// let encoded = key.to_base64();
 /// let decoded = RecoveryKey::from_base64(&encoded).unwrap();
 /// assert_eq!(key.as_bytes(), decoded.as_bytes());
@@ -46,10 +46,13 @@ impl std::fmt::Debug for RecoveryKey {
 
 impl RecoveryKey {
     /// Generate a new random recovery key.
-    pub fn generate() -> Self {
-        let mut bytes = [0u8; 32];
-        getrandom::getrandom(&mut bytes).expect("getrandom");
-        Self(bytes)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`LockNetError::InvalidResponse`] if the OS RNG is unavailable.
+    pub fn generate() -> Result<Self> {
+        let bytes = crate::core::crypto::random::random_bytes::<32>()?;
+        Ok(Self(bytes))
     }
 
     /// Wrap raw bytes.
@@ -74,9 +77,8 @@ impl RecoveryKey {
     /// Returns [`LockNetError::InvalidArgument`] if the input is not valid
     /// base64 or does not decode to exactly 32 bytes.
     pub fn from_base64(s: &str) -> Result<Self> {
-        let bytes = decode_b64(s).map_err(|_| {
-            LockNetError::InvalidArgument("recovery key: invalid base64".into())
-        })?;
+        let bytes = decode_b64(s)
+            .map_err(|_| LockNetError::InvalidArgument("recovery key: invalid base64".into()))?;
         if bytes.len() != 32 {
             return Err(LockNetError::InvalidArgument(format!(
                 "recovery key must be 32 bytes, got {}",
@@ -124,7 +126,11 @@ impl LockNetBackupHelper {
         struct W {
             versions: Vec<BackupVersion>,
         }
-        let w: W = dispatch(&self.cmd_tx, json!({ "type": "backup_versions", "data": {} })).await?;
+        let w: W = dispatch(
+            &self.cmd_tx,
+            json!({ "type": "backup_versions", "data": {} }),
+        )
+        .await?;
         Ok(w.versions)
     }
 
@@ -176,12 +182,20 @@ impl LockNetBackupHelper {
     ///
     /// - [`crate::LockNetError::Server`] with code `backup_version_not_found`.
     pub async fn get(&self, version: i32) -> Result<BackupVersionData> {
-        dispatch(&self.cmd_tx, json!({ "type": "backup_get", "data": { "version": version } })).await
+        dispatch(
+            &self.cmd_tx,
+            json!({ "type": "backup_get", "data": { "version": version } }),
+        )
+        .await
     }
 
     /// Delete a backup version and all its items.
     pub async fn delete(&self, version: i32) -> Result<()> {
-        dispatch_unit(&self.cmd_tx, json!({ "type": "backup_delete", "data": { "version": version } })).await
+        dispatch_unit(
+            &self.cmd_tx,
+            json!({ "type": "backup_delete", "data": { "version": version } }),
+        )
+        .await
     }
 
     /// Export every known Megolm inbound session to a new backup version.
@@ -236,7 +250,10 @@ impl LockNetBackupHelper {
         }
 
         let uploaded = self.put(version, items).await?;
-        Ok(BackupExportResult { version, items_uploaded: uploaded })
+        Ok(BackupExportResult {
+            version,
+            items_uploaded: uploaded,
+        })
     }
 
     /// Import all Megolm sessions from a backup version.
@@ -273,9 +290,9 @@ impl LockNetBackupHelper {
 
         let mut imported = 0u32;
         for (item_id, enc) in &data.items {
-            let (chat_id_str, megolm_session_id) = item_id.split_once(':').ok_or_else(|| {
-                LockNetError::InvalidResponse(format!("bad item_id: {item_id}"))
-            })?;
+            let (chat_id_str, megolm_session_id) = item_id
+                .split_once(':')
+                .ok_or_else(|| LockNetError::InvalidResponse(format!("bad item_id: {item_id}")))?;
             let chat_id: i64 = chat_id_str.parse().map_err(|_| {
                 LockNetError::InvalidResponse(format!("bad chat_id in item_id: {chat_id_str}"))
             })?;
@@ -299,7 +316,10 @@ impl LockNetBackupHelper {
             imported += 1;
         }
 
-        Ok(BackupImportResult { version, sessions_imported: imported })
+        Ok(BackupImportResult {
+            version,
+            sessions_imported: imported,
+        })
     }
 }
 
@@ -324,8 +344,7 @@ fn sha256_bytes(data: &[u8]) -> [u8; 32] {
 
 fn encrypt_item(secret: &[u8; 32], plaintext: &[u8]) -> Result<Value> {
     let cipher = XSalsa20Poly1305::new(GenericArray::from_slice(secret));
-    let mut nonce_bytes = [0u8; 24];
-    getrandom::getrandom(&mut nonce_bytes).expect("getrandom");
+    let nonce_bytes = crate::core::crypto::random::random_bytes::<24>()?;
     let nonce = GenericArray::from_slice(&nonce_bytes);
 
     let ciphertext = cipher

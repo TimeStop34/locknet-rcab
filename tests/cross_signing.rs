@@ -213,7 +213,9 @@ async fn usk_signs_other_msk() {
         .expect("bob query");
     let msk_sigs = &result.get(&b_uid).unwrap().master_key.signatures;
     assert_eq!(
-        msk_sigs.get(&a_uid.to_string()).and_then(|m| m.get("user_signing")),
+        msk_sigs
+            .get(&a_uid.to_string())
+            .and_then(|m| m.get("user_signing")),
         Some(&sig)
     );
 
@@ -437,7 +439,9 @@ async fn reset_clears_keys_and_affected_signers_notified() {
     );
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::CrossSigningReset(_))).await;
-    let Event::CrossSigningReset(r) = evt else { unreachable!() };
+    let Event::CrossSigningReset(r) = evt else {
+        unreachable!()
+    };
     assert_eq!(r.user_id, a_uid);
 
     let after = alice_low

@@ -15,10 +15,10 @@ use async_trait::async_trait;
 use tokio::sync::Mutex;
 use vodozemac::megolm::{GroupSession, InboundGroupSession};
 
-use crate::core::policies::{GroupDataState, MegolmOutboundMeta};
 use super::account::Account;
 use super::olm::OlmSessionEntry;
 use super::signature::CrossSigningKeysPrivate;
+use crate::core::policies::{GroupDataState, MegolmOutboundMeta};
 
 /// Maximum number of Olm sessions kept per peer device.
 pub(crate) const MAX_OLM_SESSIONS_PER_PEER: usize = 5;
@@ -169,7 +169,9 @@ impl InMemoryStore {
 }
 
 impl Default for InMemoryStore {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]

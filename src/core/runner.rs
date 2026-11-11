@@ -52,7 +52,17 @@ pub(crate) fn spawn(
     auth_ok_tx: Option<oneshot::Sender<Result<i64>>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
-        if let Err(e) = run(config, http, cmd_rx, event_tx.clone(), session, initial_ajwt, auth_ok_tx).await {
+        if let Err(e) = run(
+            config,
+            http,
+            cmd_rx,
+            event_tx.clone(),
+            session,
+            initial_ajwt,
+            auth_ok_tx,
+        )
+        .await
+        {
             tracing::warn!(?e, "runner stopped");
             let _ = event_tx.send(Event::SessionExpired);
         }
@@ -75,7 +85,16 @@ async fn run(
     let mut first_attempt = true;
 
     loop {
-        let result = run_once(&config, &mut cmd_rx, &event_tx, &pending, &mut req_counter, &mut auth_ok_tx, &mut ajwt).await;
+        let result = run_once(
+            &config,
+            &mut cmd_rx,
+            &event_tx,
+            &pending,
+            &mut req_counter,
+            &mut auth_ok_tx,
+            &mut ajwt,
+        )
+        .await;
         drain_pending(&pending).await;
 
         match result {
@@ -120,7 +139,17 @@ async fn run_once(
     ajwt: &mut String,
 ) -> Result<()> {
     let ws = ws::connect(config).await?;
-    run_ws(config, ws, cmd_rx, event_tx, pending, req_counter, auth_ok_tx, ajwt).await
+    run_ws(
+        config,
+        ws,
+        cmd_rx,
+        event_tx,
+        pending,
+        req_counter,
+        auth_ok_tx,
+        ajwt,
+    )
+    .await
 }
 
 async fn run_ws(
@@ -134,7 +163,9 @@ async fn run_ws(
     ajwt: &mut String,
 ) -> Result<()> {
     let auth_msg = json!({ "type": "auth", "id": "auth-1", "data": { "token": ajwt } });
-    ws.send(WsMessage::Text(auth_msg.to_string().into())).await.map_err(LockNetError::Ws)?;
+    ws.send(WsMessage::Text(auth_msg.to_string().into()))
+        .await
+        .map_err(LockNetError::Ws)?;
 
     let mut ping = tokio::time::interval(config.ws_ping_interval);
     ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -246,14 +277,23 @@ async fn drain_pending(pending: &Pending) {
 ///
 /// Exposed as `pub(crate)` so the doubling and capping behavior can be
 /// unit-tested without actually sleeping or triggering network errors.
-pub(crate) fn next_backoff(current: std::time::Duration, max: std::time::Duration) -> std::time::Duration {
+pub(crate) fn next_backoff(
+    current: std::time::Duration,
+    max: std::time::Duration,
+) -> std::time::Duration {
     (current * 2).min(max)
 }
 
-async fn refresh_ajwt(config: &LockNetConfig, http: &reqwest::Client, session: &Session) -> Result<String> {
+async fn refresh_ajwt(
+    config: &LockNetConfig,
+    http: &reqwest::Client,
+    session: &Session,
+) -> Result<String> {
     let rjwt = {
         let s = session.lock().await;
-        s.as_ref().map(|c| c.rjwt.clone()).ok_or(LockNetError::NotConnected)?
+        s.as_ref()
+            .map(|c| c.rjwt.clone())
+            .ok_or(LockNetError::NotConnected)?
     };
     let resp = http::refresh(config, http, &rjwt).await?;
     {
@@ -275,17 +315,35 @@ mod tests {
     #[test]
     fn backoff_doubles() {
         let max = Duration::from_secs(60);
-        assert_eq!(next_backoff(Duration::from_secs(1), max), Duration::from_secs(2));
-        assert_eq!(next_backoff(Duration::from_secs(2), max), Duration::from_secs(4));
-        assert_eq!(next_backoff(Duration::from_secs(4), max), Duration::from_secs(8));
+        assert_eq!(
+            next_backoff(Duration::from_secs(1), max),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(2), max),
+            Duration::from_secs(4)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(4), max),
+            Duration::from_secs(8)
+        );
     }
 
     #[test]
     fn backoff_caps_at_max() {
         let max = Duration::from_secs(60);
-        assert_eq!(next_backoff(Duration::from_secs(40), max), Duration::from_secs(60));
-        assert_eq!(next_backoff(Duration::from_secs(60), max), Duration::from_secs(60));
-        assert_eq!(next_backoff(Duration::from_secs(120), max), Duration::from_secs(60));
+        assert_eq!(
+            next_backoff(Duration::from_secs(40), max),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(60), max),
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            next_backoff(Duration::from_secs(120), max),
+            Duration::from_secs(60)
+        );
     }
 
     #[test]

@@ -24,11 +24,17 @@ pub(crate) trait ReplyHandler: Send {
     fn resolve_err(self: Box<Self>, err: LockNetError);
 }
 
-impl<T: DeserializeOwned + Send + 'static> ReplyHandler for oneshot::Sender<crate::core::errors::Result<T>> {
+impl<T: DeserializeOwned + Send + 'static> ReplyHandler
+    for oneshot::Sender<crate::core::errors::Result<T>>
+{
     fn resolve_ok(self: Box<Self>, value: Value) {
         match serde_json::from_value::<T>(value) {
-            Ok(v) => { let _ = self.send(Ok(v)); }
-            Err(e) => { let _ = self.send(Err(LockNetError::Json(e))); }
+            Ok(v) => {
+                let _ = self.send(Ok(v));
+            }
+            Err(e) => {
+                let _ = self.send(Err(LockNetError::Json(e)));
+            }
         }
     }
     fn resolve_err(self: Box<Self>, err: LockNetError) {
@@ -39,7 +45,10 @@ impl<T: DeserializeOwned + Send + 'static> ReplyHandler for oneshot::Sender<crat
 /// Commands sent from API methods to the runner.
 pub(crate) enum Cmd {
     /// Send a request and resolve `reply` with the server's response.
-    Request { payload: Value, reply: Box<dyn ReplyHandler> },
+    Request {
+        payload: Value,
+        reply: Box<dyn ReplyHandler>,
+    },
 
     /// Shut down the runner gracefully.
     Shutdown { reply: oneshot::Sender<()> },
@@ -81,7 +90,10 @@ pub(crate) async fn dispatch<T: DeserializeOwned + Send + 'static>(
     let (reply_tx, reply_rx) = oneshot::channel();
     cmd_tx
         .tx
-        .send(Cmd::Request { payload, reply: Box::new(reply_tx) })
+        .send(Cmd::Request {
+            payload,
+            reply: Box::new(reply_tx),
+        })
         .await
         .map_err(|_| LockNetError::RunnerDown)?;
 

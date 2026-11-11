@@ -133,9 +133,10 @@ async fn bob_receives_message_updated() {
         .await
         .expect("send");
 
-    let _ = wait_high_event(&mut rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id)
-    })
+    let _ = wait_high_event(
+        &mut rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id),
+    )
     .await;
 
     alice_low
@@ -147,9 +148,10 @@ async fn bob_receives_message_updated() {
         .await
         .expect("edit");
 
-    let evt = wait_high_event(&mut rx, |e| {
-        matches!(e, HighEvent::MessageUpdated { message, .. } if message.id == ack.message_id)
-    })
+    let evt = wait_high_event(
+        &mut rx,
+        |e| matches!(e, HighEvent::MessageUpdated { message, .. } if message.id == ack.message_id),
+    )
     .await;
 
     match evt {
@@ -192,9 +194,10 @@ async fn bob_receives_message_deleted() {
         .await
         .expect("send");
 
-    let _ = wait_high_event(&mut rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id)
-    })
+    let _ = wait_high_event(
+        &mut rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id),
+    )
     .await;
 
     alice_low
@@ -209,7 +212,10 @@ async fn bob_receives_message_deleted() {
     .await;
 
     match evt {
-        HighEvent::MessageDeleted { chat_id, message_id } => {
+        HighEvent::MessageDeleted {
+            chat_id,
+            message_id,
+        } => {
             assert_eq!(chat_id, group_id);
             assert_eq!(message_id, ack.message_id);
         }
@@ -261,7 +267,12 @@ async fn alice_receives_reaction_added() {
     .await;
 
     match evt {
-        HighEvent::ReactionAdded { chat_id, message_id, user, emoji } => {
+        HighEvent::ReactionAdded {
+            chat_id,
+            message_id,
+            user,
+            emoji,
+        } => {
             assert_eq!(chat_id, group_id);
             assert_eq!(message_id, ack.message_id);
             assert_eq!(user.id, bob.session.user_id);
@@ -299,9 +310,10 @@ async fn bob_state_reaction_added_and_removed() {
         .await
         .expect("send");
 
-    let _ = wait_high_event(&mut rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id)
-    })
+    let _ = wait_high_event(
+        &mut rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == ack.message_id),
+    )
     .await;
 
     bob_low
@@ -333,7 +345,10 @@ async fn bob_state_reaction_added_and_removed() {
     .await;
 
     let cached = bob_agent.cached_message(ack.message_id).expect("cached");
-    assert!(cached.reactions.is_empty(), "removing the last reaction drops the entry");
+    assert!(
+        cached.reactions.is_empty(),
+        "removing the last reaction drops the entry"
+    );
 
     let mut a = alice;
     let mut b = bob;
@@ -411,13 +426,20 @@ async fn alice_receives_membership_added_and_left() {
     let evt = wait_high_event(&mut alice_rx, |e| {
         matches!(
             e,
-            HighEvent::GroupMembershipChanged { change: MembershipChange::Added, .. }
+            HighEvent::GroupMembershipChanged {
+                change: MembershipChange::Added,
+                ..
+            }
         )
     })
     .await;
 
     match evt {
-        HighEvent::GroupMembershipChanged { group_id, change, user } => {
+        HighEvent::GroupMembershipChanged {
+            group_id,
+            change,
+            user,
+        } => {
             assert_eq!(group_id, group.id);
             assert_eq!(change, MembershipChange::Added);
             assert_eq!(user.id, bob.session.user_id);
@@ -425,22 +447,25 @@ async fn alice_receives_membership_added_and_left() {
         _ => unreachable!(),
     }
 
-    bob_low
-        .groups()
-        .leave(group.id)
-        .await
-        .expect("leave");
+    bob_low.groups().leave(group.id).await.expect("leave");
 
     let evt = wait_high_event(&mut alice_rx, |e| {
         matches!(
             e,
-            HighEvent::GroupMembershipChanged { change: MembershipChange::Left, .. }
+            HighEvent::GroupMembershipChanged {
+                change: MembershipChange::Left,
+                ..
+            }
         )
     })
     .await;
 
     match evt {
-        HighEvent::GroupMembershipChanged { group_id, change, user } => {
+        HighEvent::GroupMembershipChanged {
+            group_id,
+            change,
+            user,
+        } => {
             assert_eq!(group_id, group.id);
             assert_eq!(change, MembershipChange::Left);
             assert_eq!(user.id, bob.session.user_id);

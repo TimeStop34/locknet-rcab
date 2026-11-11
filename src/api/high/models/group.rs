@@ -1,9 +1,9 @@
 //! Groups (chats) and their members.
 
+use super::user::User;
+use crate::core::policies::{GroupData, HistoryVisibility, MegolmRotationVisibility};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use crate::core::policies::{GroupData, HistoryVisibility, MegolmRotationVisibility};
-use super::user::User;
 
 /// A group member with their resolved [`User`] and membership metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]

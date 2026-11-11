@@ -104,7 +104,10 @@ async fn sas_via_high_full_flow() {
         .await
         .expect("alice sas_start");
 
-    let evt = wait_sas_message(&mut bob_high_rx, |e| matches!(e, HighEvent::SasMessage { .. })).await;
+    let evt = wait_sas_message(&mut bob_high_rx, |e| {
+        matches!(e, HighEvent::SasMessage { .. })
+    })
+    .await;
     let bob_txid = match evt {
         HighEvent::SasMessage { content, .. } => {
             let t = content.get("type").and_then(|v| v.as_str()).unwrap_or("");
@@ -117,7 +120,10 @@ async fn sas_via_high_full_flow() {
         }
         _ => unreachable!(),
     };
-    assert_eq!(alice_txid, bob_txid, "transaction_id must match on both sides");
+    assert_eq!(
+        alice_txid, bob_txid,
+        "transaction_id must match on both sides"
+    );
 
     bob_agent
         .security()
@@ -157,7 +163,11 @@ async fn sas_via_high_full_flow() {
         assert_eq!(a.symbol, b.symbol, "emoji mismatch");
     }
 
-    let ag = alice_agent.security().emojis_get(&alice_txid).await.expect("alice emojis_get");
+    let ag = alice_agent
+        .security()
+        .emojis_get(&alice_txid)
+        .await
+        .expect("alice emojis_get");
     assert!(ag.is_some());
     assert_eq!(ag.unwrap().len(), 7);
 
@@ -179,7 +189,10 @@ async fn sas_via_high_full_flow() {
     .await
     .expect("alice final timeout")
     .expect("alice final");
-    assert!(matches!(alice_final, locknet_rcab::SasStep::Verified), "alice: {alice_final:?}");
+    assert!(
+        matches!(alice_final, locknet_rcab::SasStep::Verified),
+        "alice: {alice_final:?}"
+    );
 
     let bob_final = tokio::time::timeout(
         Duration::from_secs(10),
@@ -188,14 +201,23 @@ async fn sas_via_high_full_flow() {
     .await
     .expect("bob final timeout")
     .expect("bob final");
-    assert!(matches!(bob_final, locknet_rcab::SasStep::Verified), "bob: {bob_final:?}");
+    assert!(
+        matches!(bob_final, locknet_rcab::SasStep::Verified),
+        "bob: {bob_final:?}"
+    );
 
     assert!(
-        alice_agent.security().is_session_verified(bob_uid, bob_sid).await,
+        alice_agent
+            .security()
+            .is_session_verified(bob_uid, bob_sid)
+            .await,
         "alice: bob session is verified"
     );
     assert!(
-        bob_agent.security().is_session_verified(alice_uid, alice_sid).await,
+        bob_agent
+            .security()
+            .is_session_verified(alice_uid, alice_sid)
+            .await,
         "bob: alice session is verified"
     );
     assert!(alice_agent.security().is_user_verified(bob_uid).await);
@@ -231,7 +253,10 @@ async fn sas_decline_leaves_no_flow() {
         .await
         .expect("alice start");
 
-    let evt = wait_sas_message(&mut bob_high_rx, |e| matches!(e, HighEvent::SasMessage { .. })).await;
+    let evt = wait_sas_message(&mut bob_high_rx, |e| {
+        matches!(e, HighEvent::SasMessage { .. })
+    })
+    .await;
     let bob_txid = match evt {
         HighEvent::SasMessage { content, .. } => content
             .pointer("/content/transaction_id")
@@ -247,11 +272,7 @@ async fn sas_decline_leaves_no_flow() {
         .await
         .expect("bob decline");
 
-    let err = bob_agent
-        .security()
-        .sas_next(&bob_txid)
-        .await
-        .unwrap_err();
+    let err = bob_agent.security().sas_next(&bob_txid).await.unwrap_err();
     assert!(
         matches!(err, locknet_rcab::LockNetError::InvalidArgument(_)),
         "expected InvalidArgument, got {err:?}"
@@ -287,7 +308,10 @@ async fn sas_cancel_works_before_confirm() {
         .await
         .expect("alice start");
 
-    let evt = wait_sas_message(&mut bob_high_rx, |e| matches!(e, HighEvent::SasMessage { .. })).await;
+    let evt = wait_sas_message(&mut bob_high_rx, |e| {
+        matches!(e, HighEvent::SasMessage { .. })
+    })
+    .await;
     let bob_txid = match evt {
         HighEvent::SasMessage { content, .. } => content
             .pointer("/content/transaction_id")
@@ -297,21 +321,44 @@ async fn sas_cancel_works_before_confirm() {
         _ => unreachable!(),
     };
 
-    bob_agent.security().sas_accept(&bob_txid).await.expect("bob accept");
+    bob_agent
+        .security()
+        .sas_accept(&bob_txid)
+        .await
+        .expect("bob accept");
 
-    let _ = alice_agent.security().sas_next(&alice_txid).await.expect("alice emoji");
-    let _ = bob_agent.security().sas_next(&bob_txid).await.expect("bob emoji");
+    let _ = alice_agent
+        .security()
+        .sas_next(&alice_txid)
+        .await
+        .expect("alice emoji");
+    let _ = bob_agent
+        .security()
+        .sas_next(&bob_txid)
+        .await
+        .expect("bob emoji");
 
-    alice_agent.security().sas_cancel(&alice_txid).await.expect("alice cancel");
+    alice_agent
+        .security()
+        .sas_cancel(&alice_txid)
+        .await
+        .expect("alice cancel");
 
     let err = alice_agent
         .security()
         .sas_next(&alice_txid)
         .await
         .unwrap_err();
-    assert!(matches!(err, locknet_rcab::LockNetError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        locknet_rcab::LockNetError::InvalidArgument(_)
+    ));
 
-    bob_agent.security().sas_cancel(&bob_txid).await.expect("bob cancel");
+    bob_agent
+        .security()
+        .sas_cancel(&bob_txid)
+        .await
+        .expect("bob cancel");
 
     let mut a = alice;
     let mut b = bob;

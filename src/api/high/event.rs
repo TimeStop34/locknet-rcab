@@ -5,8 +5,8 @@
 //! available), chats have resolved member lists, and all multi-step flows
 //! (key requests, verification) are surfaced as discrete progress events.
 
-use crate::api::low::models::MembershipChange;
 use super::models::{Chat, Group, Invite, Message, User};
+use crate::api::low::models::MembershipChange;
 
 /// An event broadcast by [`crate::LockNetAgent`].
 ///
@@ -25,10 +25,20 @@ pub enum HighEvent {
     MessageDeleted { chat_id: i64, message_id: i64 },
 
     /// A reaction was added.
-    ReactionAdded { chat_id: i64, message_id: i64, user: User, emoji: String },
+    ReactionAdded {
+        chat_id: i64,
+        message_id: i64,
+        user: User,
+        emoji: String,
+    },
 
     /// A reaction was removed.
-    ReactionRemoved { chat_id: i64, message_id: i64, user: User, emoji: String },
+    ReactionRemoved {
+        chat_id: i64,
+        message_id: i64,
+        user: User,
+        emoji: String,
+    },
 
     /// A group was created.
     GroupCreated { group: Group },
@@ -72,12 +82,19 @@ pub enum HighEvent {
     },
 
     /// A Megolm inbound session was imported into the local store.
-    KeyImported { chat_id: i64, megolm_session_id: String },
+    KeyImported {
+        chat_id: i64,
+        megolm_session_id: String,
+    },
 
     /// A previously-undecryptable message is now decrypted (after a key
     /// arrived). `state.messages` is already updated; this event is purely
     /// for UI notification.
-    MessageDecrypted { chat_id: i64, message_id: i64, text: String },
+    MessageDecrypted {
+        chat_id: i64,
+        message_id: i64,
+        text: String,
+    },
 
     /// Another session sent an `ln.encryption.key_request`.
     KeyRequestReceived {

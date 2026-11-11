@@ -50,7 +50,9 @@ async fn olm_send_and_receive() {
         .expect("olm send");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(payload) = evt else { unreachable!() };
+    let Event::ToDevice(payload) = evt else {
+        unreachable!()
+    };
 
     assert_eq!(payload.sender_session_id, alice.session.session_id);
     assert_eq!(payload.algorithm, "ln.encryption.olm.v1");
@@ -98,8 +100,16 @@ async fn olm_bidirectional() {
         .expect("alice send");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    let pt = bob_low.olm().decrypt(p).wait().await.expect("bob decrypt").unwrap();
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    let pt = bob_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("bob decrypt")
+        .unwrap();
     assert_eq!(pt, "hi bob");
 
     bob_low
@@ -110,8 +120,16 @@ async fn olm_bidirectional() {
         .expect("bob send");
 
     let evt = common::wait_event(&mut alice_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    let pt = alice_low.olm().decrypt(p).wait().await.expect("alice decrypt").unwrap();
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    let pt = alice_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("alice decrypt")
+        .unwrap();
     assert_eq!(pt, "hi alice");
 
     let mut a = alice;
@@ -151,7 +169,9 @@ async fn olm_second_message_is_normal_type() {
         .expect("send #1");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p1) = evt else { unreachable!() };
+    let Event::ToDevice(p1) = evt else {
+        unreachable!()
+    };
 
     let bob_curve = {
         let acc = bob_low.store().account().await;
@@ -164,7 +184,13 @@ async fn olm_second_message_is_normal_type() {
         "first message must be a pre-key (type=0)"
     );
 
-    let pt1 = bob_low.olm().decrypt(p1).wait().await.expect("decrypt #1").unwrap();
+    let pt1 = bob_low
+        .olm()
+        .decrypt(p1)
+        .wait()
+        .await
+        .expect("decrypt #1")
+        .unwrap();
     assert_eq!(pt1, "first");
 
     // Step 2: Bob → Alice, "ack" — establishes the session on both sides.
@@ -176,8 +202,16 @@ async fn olm_second_message_is_normal_type() {
         .expect("send ack");
 
     let evt = common::wait_event(&mut alice_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(pa) = evt else { unreachable!() };
-    let pta = alice_low.olm().decrypt(pa).wait().await.expect("decrypt ack").unwrap();
+    let Event::ToDevice(pa) = evt else {
+        unreachable!()
+    };
+    let pta = alice_low
+        .olm()
+        .decrypt(pa)
+        .wait()
+        .await
+        .expect("decrypt ack")
+        .unwrap();
     assert_eq!(pta, "ack");
 
     // Step 3: Alice → Bob, "second" — must be type=1 (normal) now.
@@ -189,7 +223,9 @@ async fn olm_second_message_is_normal_type() {
         .expect("send #2");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p2) = evt else { unreachable!() };
+    let Event::ToDevice(p2) = evt else {
+        unreachable!()
+    };
     let inner2 = p2.ciphertext.get(&bob_curve).expect("ciphertext");
     assert_eq!(
         inner2.ciphertext_type, 1,
@@ -197,7 +233,13 @@ async fn olm_second_message_is_normal_type() {
         inner2.ciphertext_type
     );
 
-    let pt2 = bob_low.olm().decrypt(p2).wait().await.expect("decrypt #2").unwrap();
+    let pt2 = bob_low
+        .olm()
+        .decrypt(p2)
+        .wait()
+        .await
+        .expect("decrypt #2")
+        .unwrap();
     assert_eq!(pt2, "second");
 
     let mut a = alice;

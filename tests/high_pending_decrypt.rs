@@ -87,7 +87,10 @@ async fn message_decrypted_event_after_group_key() {
 
     let bob_chat = bob_agent.chat(group_id).await.expect("chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
-    let msg = history.iter().find(|m| m.id == ack.message_id).expect("msg");
+    let msg = history
+        .iter()
+        .find(|m| m.id == ack.message_id)
+        .expect("msg");
     assert_eq!(msg.text, None, "without the key, text must be None");
 
     let mut bob_rx = bob_agent.subscribe();
@@ -110,7 +113,11 @@ async fn message_decrypted_event_after_group_key() {
     .await;
 
     match evt {
-        HighEvent::MessageDecrypted { chat_id, message_id, text } => {
+        HighEvent::MessageDecrypted {
+            chat_id,
+            message_id,
+            text,
+        } => {
             assert_eq!(chat_id, group_id);
             assert_eq!(message_id, ack.message_id);
             assert_eq!(text, "pending secret");
@@ -181,7 +188,9 @@ async fn multiple_pending_messages_all_decrypted() {
     let mut received = Vec::new();
     for _ in 0..30 {
         match tokio::time::timeout(Duration::from_millis(200), bob_rx.recv()).await {
-            Ok(Ok(HighEvent::MessageDecrypted { message_id, text, .. })) => {
+            Ok(Ok(HighEvent::MessageDecrypted {
+                message_id, text, ..
+            })) => {
                 if ack_ids.contains(&message_id) {
                     received.push((message_id, text));
                     if received.len() == 3 {
@@ -197,7 +206,11 @@ async fn multiple_pending_messages_all_decrypted() {
 
     for (mid, text) in received {
         let expected_idx = ack_ids.iter().position(|id| *id == mid).unwrap();
-        assert_eq!(text, format!("msg-{expected_idx}"), "plaintext for msg {mid}");
+        assert_eq!(
+            text,
+            format!("msg-{expected_idx}"),
+            "plaintext for msg {mid}"
+        );
     }
 
     let history2 = bob_chat.messages(None, 20).await.expect("messages 2");

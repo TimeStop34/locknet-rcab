@@ -74,9 +74,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -117,8 +126,15 @@ async fn sign_msk(
     target_uid: i64,
 ) {
     let low = signer_agent.low();
-    let query = low.crypto().query_cross_signing_keys(vec![target_uid]).await.unwrap();
-    let target_msk = query.get(&target_uid).map(|u| u.master_key.key.clone()).unwrap();
+    let query = low
+        .crypto()
+        .query_cross_signing_keys(vec![target_uid])
+        .await
+        .unwrap();
+    let target_msk = query
+        .get(&target_uid)
+        .map(|u| u.master_key.key.clone())
+        .unwrap();
     let sig = sign_b64(&signer_keys.usk, &target_msk).unwrap();
 
     low.crypto()
@@ -138,15 +154,25 @@ async fn set_history_visibility(low: &LockNetLowAgent, chat_id: i64, vis: Histor
     use locknet_rcab::core::crypto::group_data::encrypt_group_data;
     use locknet_rcab::core::policies::GroupDataState;
 
-    let state = low.store().group_data_state(chat_id).await.expect("group_data");
+    let state = low
+        .store()
+        .group_data_state(chat_id)
+        .await
+        .expect("group_data");
     let mut data = state.data.clone();
     data.version += 1;
     data.history_visibility = vis;
     let blob = encrypt_group_data(&data, &state.key).expect("re-encrypt");
-    low.store().group_data_state_put(
-        chat_id,
-        GroupDataState { key: state.key, data, blob },
-    ).await;
+    low.store()
+        .group_data_state_put(
+            chat_id,
+            GroupDataState {
+                key: state.key,
+                data,
+                blob,
+            },
+        )
+        .await;
 }
 
 /// Alice sends a message using low-level primitives **without** fan-out, so
@@ -155,7 +181,11 @@ async fn set_history_visibility(low: &LockNetLowAgent, chat_id: i64, vis: Histor
 async fn alice_send_no_fanout(low: &LockNetLowAgent, chat_id: i64, text: &str) -> i64 {
     low.megolm().create(chat_id).await.expect("create");
     let enc = low.megolm().encrypt(chat_id, text).await.expect("encrypt");
-    low.messages().send(chat_id, enc).await.expect("send").message_id
+    low.messages()
+        .send(chat_id, enc)
+        .await
+        .expect("send")
+        .message_id
 }
 
 // ---- tests ----
@@ -186,7 +216,10 @@ async fn after_join_denies_all() {
 
     let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
-    let msg = history.iter().find(|m| m.id == msg_id).expect("msg in history");
+    let msg = history
+        .iter()
+        .find(|m| m.id == msg_id)
+        .expect("msg in history");
     assert_eq!(msg.text, None, "Bob has no key and cannot read it");
 
     let err = bob_chat.request_missing_keys().await.unwrap_err();
@@ -291,7 +324,10 @@ async fn all_verified_users_requires_user_trust() {
         .await
         .expect("second request_missing_keys");
     assert!(pending >= 1);
-    assert!(imported >= 1, "after the USK signature, Bob receives the key");
+    assert!(
+        imported >= 1,
+        "after the USK signature, Bob receives the key"
+    );
 
     let history = bob_chat.messages(None, 20).await.expect("messages");
     let msg = history.iter().find(|m| m.id == msg_id).expect("msg");

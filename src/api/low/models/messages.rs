@@ -1,8 +1,8 @@
 //! Message, reaction, and message-related event wire types.
 
+use super::common::Encrypted;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use super::common::Encrypted;
 
 /// Result of `send_message`.
 #[derive(Debug, Clone, Serialize, Deserialize)]

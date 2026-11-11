@@ -33,9 +33,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use locknet_rcab::{
-    Credentials, Event, HighEvent, LockNetClient, LockNetLowAgent, SqliteStore,
-};
+use locknet_rcab::{Credentials, Event, HighEvent, LockNetClient, LockNetLowAgent, SqliteStore};
 use tokio::sync::broadcast;
 
 // ---- helpers ----
@@ -78,9 +76,16 @@ async fn warmup_olm(
     b_sid: i64,
 ) {
     let mut rx = b_low.subscribe();
-    a_low.olm().send(b_uid, b_sid, "warmup").wait().await.expect("send");
+    a_low
+        .olm()
+        .send(b_uid, b_sid, "warmup")
+        .wait()
+        .await
+        .expect("send");
     let evt = common::wait_event(&mut rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
     b_low.olm().decrypt(p).wait().await.expect("decrypt");
 
     let mut rx2 = a_low.subscribe();
@@ -91,7 +96,9 @@ async fn warmup_olm(
         .await
         .expect("send-rev");
     let evt = common::wait_event(&mut rx2, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
     a_low.olm().decrypt(p).wait().await.expect("decrypt-rev");
 }
 
@@ -271,7 +278,12 @@ async fn megolm_outbound_survives_literal_restart() {
 
         let alice_chat = alice_agent.chat(gid).await.expect("chat");
         let m1 = alice_chat.send("first").await.expect("send m1");
-        let s1 = m1.encrypted_payload.as_ref().unwrap().megolm_session_id.clone();
+        let s1 = m1
+            .encrypted_payload
+            .as_ref()
+            .unwrap()
+            .megolm_session_id
+            .clone();
 
         alice.disconnect().await.ok();
         bob.disconnect().await.ok();
@@ -298,7 +310,12 @@ async fn megolm_outbound_survives_literal_restart() {
         let alice_agent = alice.get_agent().expect("alice agent 2");
         let alice_chat = alice_agent.chat(group_id).await.expect("chat 2");
         let m2 = alice_chat.send("second").await.expect("send m2");
-        let s2 = m2.encrypted_payload.as_ref().unwrap().megolm_session_id.clone();
+        let s2 = m2
+            .encrypted_payload
+            .as_ref()
+            .unwrap()
+            .megolm_session_id
+            .clone();
 
         assert_eq!(
             s1, s2,
@@ -359,14 +376,16 @@ async fn megolm_inbound_survives_literal_restart() {
         let mut bob_rx = bob_agent.subscribe();
         let alice_chat = alice_agent.chat(gid).await.expect("chat");
         let m1 = alice_chat.send("history-1").await.expect("m1");
-        let _ = wait_high(&mut bob_rx, |e| {
-            matches!(e, HighEvent::NewMessage { message, .. } if message.id == m1.id)
-        })
+        let _ = wait_high(
+            &mut bob_rx,
+            |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == m1.id),
+        )
         .await;
         let m2 = alice_chat.send("history-2").await.expect("m2");
-        let _ = wait_high(&mut bob_rx, |e| {
-            matches!(e, HighEvent::NewMessage { message, .. } if message.id == m2.id)
-        })
+        let _ = wait_high(
+            &mut bob_rx,
+            |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == m2.id),
+        )
         .await;
 
         let bob_chat = bob_agent.chat(gid).await.expect("bob chat");
@@ -509,7 +528,9 @@ async fn olm_session_survives_literal_restart() {
             .expect("send");
 
         let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-        let Event::ToDevice(payload) = evt else { unreachable!() };
+        let Event::ToDevice(payload) = evt else {
+            unreachable!()
+        };
         let inner = payload
             .ciphertext
             .get(&bob_curve)

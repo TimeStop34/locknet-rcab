@@ -1,13 +1,13 @@
 //! Helper facade for SAS and QR flows.
 
-use std::sync::Arc;
-use tokio::sync::broadcast;
 use crate::api::low::command::CmdSender;
 use crate::api::low::event::Event;
 use crate::api::low::helpers::olm::LockNetOlmHelper;
 use crate::api::low::helpers::verification::sas::SasFlow;
 use crate::core::crypto::CryptoStore;
 use crate::core::errors::Result;
+use std::sync::Arc;
+use tokio::sync::broadcast;
 
 /// Entry point for verification flows.
 ///
@@ -39,16 +39,47 @@ impl LockNetVerificationHelper {
     ///
     /// - [`crate::LockNetError::RunnerDown`] if the Olm channel is closed.
     /// - [`crate::LockNetError::Timeout`] on send timeout.
-    pub async fn sas_start(&self, to_user: i64, to_session: i64, our_msk_b64: String, our_ed25519_b64: String) -> Result<SasFlow> {
-        SasFlow::start(self.olm.clone(), self.event_tx.subscribe(), self.store.clone(), to_user, to_session, our_msk_b64, our_ed25519_b64).await
+    pub async fn sas_start(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        our_msk_b64: String,
+        our_ed25519_b64: String,
+    ) -> Result<SasFlow> {
+        SasFlow::start(
+            self.olm.clone(),
+            self.event_tx.subscribe(),
+            self.store.clone(),
+            to_user,
+            to_session,
+            our_msk_b64,
+            our_ed25519_b64,
+        )
+        .await
     }
 
     /// Respond to an incoming `ln.encryption.key.verification.start`.
     ///
     /// Immediately sends `accept` and `key`. The returned [`SasFlow`] must be
     /// driven with [`SasFlow::next`] / [`SasFlow::confirm_emoji`].
-    pub async fn sas_start_responder(&self, to_user: i64, to_session: i64, txid: String, our_msk_b64: String, our_ed25519_b64: String) -> Result<SasFlow> {
-        SasFlow::start_as_responder(self.olm.clone(), self.event_tx.subscribe(), txid, to_user, to_session, our_msk_b64, our_ed25519_b64).await
+    pub async fn sas_start_responder(
+        &self,
+        to_user: i64,
+        to_session: i64,
+        txid: String,
+        our_msk_b64: String,
+        our_ed25519_b64: String,
+    ) -> Result<SasFlow> {
+        SasFlow::start_as_responder(
+            self.olm.clone(),
+            self.event_tx.subscribe(),
+            txid,
+            to_user,
+            to_session,
+            our_msk_b64,
+            our_ed25519_b64,
+        )
+        .await
     }
 
     /// Show a QR code (displayer side).
@@ -62,7 +93,10 @@ impl LockNetVerificationHelper {
         to_session: i64,
         our_msk_b64: String,
         our_ed25519_b64: String,
-    ) -> Result<(crate::api::low::helpers::verification::qr::QrCode, crate::api::low::helpers::verification::qr::QrFlow)> {
+    ) -> Result<(
+        crate::api::low::helpers::verification::qr::QrCode,
+        crate::api::low::helpers::verification::qr::QrFlow,
+    )> {
         crate::api::low::helpers::verification::qr::QrFlow::display(
             mode,
             self.olm.clone(),
@@ -71,7 +105,8 @@ impl LockNetVerificationHelper {
             to_session,
             our_msk_b64,
             our_ed25519_b64,
-        ).await
+        )
+        .await
     }
 
     /// Scan a QR code (scanner side).
@@ -94,6 +129,7 @@ impl LockNetVerificationHelper {
             to_session,
             our_msk_b64,
             our_ed25519_b64,
-        ).await
+        )
+        .await
     }
 }

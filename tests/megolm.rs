@@ -53,7 +53,9 @@ async fn setup_olm(
         .expect("olm setup send");
 
     let evt = common::wait_event(&mut rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
     bob_low
         .olm()
         .decrypt(p)
@@ -69,8 +71,15 @@ async fn setup_olm(
         .await
         .expect("reverse setup send");
     let evt = common::wait_event(&mut rx2, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    alice_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    alice_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("reverse setup decrypt");
 }
 
 /// Read Alice's Curve25519 identity key (used to assert the server rewrote
@@ -123,7 +132,9 @@ async fn megolm_full_flow() {
         .expect("share group_key");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(td) = evt else { unreachable!() };
+    let Event::ToDevice(td) = evt else {
+        unreachable!()
+    };
 
     let alice_curve = alice_curve25519(&alice_low).await;
     assert_eq!(td.algorithm, "ln.encryption.olm.v1");
@@ -165,7 +176,9 @@ async fn megolm_full_flow() {
         |e| matches!(e, Event::MessageCreate(m) if m.message_id == ack.message_id),
     )
     .await;
-    let Event::MessageCreate(mc) = evt else { unreachable!() };
+    let Event::MessageCreate(mc) = evt else {
+        unreachable!()
+    };
 
     let pt = bob_low
         .megolm()
@@ -231,7 +244,10 @@ async fn megolm_no_key_cannot_decrypt() {
         .decrypt(group_id, &encrypted)
         .await
         .expect("decrypt attempt");
-    assert!(pt.is_none(), "bob must not decrypt without the key, got {pt:?}");
+    assert!(
+        pt.is_none(),
+        "bob must not decrypt without the key, got {pt:?}"
+    );
 
     // Unknown chat_id also yields None rather than an error.
     let pt_unknown = bob_low
@@ -271,7 +287,11 @@ async fn megolm_rotation_isolates() {
     setup_olm(&alice_low, &bob_low, bob_uid, bob_sid).await;
     let group_id = common::setup_group_with_two(&alice, &bob, "MegolmRot").await;
 
-    let info1 = alice_low.megolm().create(group_id).await.expect("create #1");
+    let info1 = alice_low
+        .megolm()
+        .create(group_id)
+        .await
+        .expect("create #1");
     let mut bob_rx = bob_low.subscribe();
     alice_low
         .megolm()
@@ -280,15 +300,30 @@ async fn megolm_rotation_isolates() {
         .expect("share #1");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(td) = evt else { unreachable!() };
+    let Event::ToDevice(td) = evt else {
+        unreachable!()
+    };
     let pt = bob_low.olm().decrypt(td).wait().await.unwrap().unwrap();
-    bob_low.megolm().decrypt_group_key(&pt).await.expect("import #1");
+    bob_low
+        .megolm()
+        .decrypt_group_key(&pt)
+        .await
+        .expect("import #1");
 
     let enc1 = alice_low.megolm().encrypt(group_id, "msg1").await.unwrap();
     assert_eq!(enc1.megolm_session_id, info1.megolm_session_id);
-    let _ack1 = alice_low.messages().send(group_id, enc1.clone()).await.unwrap();
+    let _ack1 = alice_low
+        .messages()
+        .send(group_id, enc1.clone())
+        .await
+        .unwrap();
 
-    let pt1 = bob_low.megolm().decrypt(group_id, &enc1).await.unwrap().unwrap();
+    let pt1 = bob_low
+        .megolm()
+        .decrypt(group_id, &enc1)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pt1, "msg1");
 
     let info2 = alice_low.megolm().rotate(group_id).await.expect("rotate");
@@ -299,7 +334,10 @@ async fn megolm_rotation_isolates() {
 
     // Bob never received session #2, so decryption yields None.
     let pt2 = bob_low.megolm().decrypt(group_id, &enc2).await.unwrap();
-    assert!(pt2.is_none(), "bob must not decrypt msg2 without session #2");
+    assert!(
+        pt2.is_none(),
+        "bob must not decrypt msg2 without session #2"
+    );
 
     // Old session still decrypts old messages.
     let pt1_again = bob_low.megolm().decrypt(group_id, &enc1).await.unwrap();
@@ -307,11 +345,21 @@ async fn megolm_rotation_isolates() {
 
     // Alice holds both inbound sessions and can decrypt everything.
     assert_eq!(
-        alice_low.megolm().decrypt(group_id, &enc1).await.unwrap().as_deref(),
+        alice_low
+            .megolm()
+            .decrypt(group_id, &enc1)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("msg1")
     );
     assert_eq!(
-        alice_low.megolm().decrypt(group_id, &enc2).await.unwrap().as_deref(),
+        alice_low
+            .megolm()
+            .decrypt(group_id, &enc2)
+            .await
+            .unwrap()
+            .as_deref(),
         Some("msg2")
     );
 
@@ -332,8 +380,16 @@ async fn megolm_ensure_session_idempotent() {
     let alice_low = alice.low();
     let group_id = common::setup_group_with_two(&alice, &bob, "MegolmEns").await;
 
-    let (s1, _) = alice_low.megolm().ensure_session(group_id).await.expect("ensure 1");
-    let (s2, _) = alice_low.megolm().ensure_session(group_id).await.expect("ensure 2");
+    let (s1, _) = alice_low
+        .megolm()
+        .ensure_session(group_id)
+        .await
+        .expect("ensure 1");
+    let (s2, _) = alice_low
+        .megolm()
+        .ensure_session(group_id)
+        .await
+        .expect("ensure 2");
     assert_eq!(s1.megolm_session_id, s2.megolm_session_id);
     assert_eq!(s1.session_key, s2.session_key);
 
@@ -358,15 +414,26 @@ async fn megolm_decrypt_group_key_wrong_type_returns_false() {
     let bob_low = bob.low();
 
     let pt_not_json = "not json at all";
-    assert!(!bob_low.megolm().decrypt_group_key(pt_not_json).await.unwrap());
+    assert!(!bob_low
+        .megolm()
+        .decrypt_group_key(pt_not_json)
+        .await
+        .unwrap());
 
     let pt_wrong_type = r#"{"type":"ln.something.else","content":{}}"#;
-    assert!(!bob_low.megolm().decrypt_group_key(pt_wrong_type).await.unwrap());
+    assert!(!bob_low
+        .megolm()
+        .decrypt_group_key(pt_wrong_type)
+        .await
+        .unwrap());
 
     // Wrong shape (missing content) is an error, not a silent false.
     let pt_missing_content = r#"{"type":"ln.encryption.group_key"}"#;
     let res = bob_low.megolm().decrypt_group_key(pt_missing_content).await;
-    assert!(res.is_err(), "expected error for missing content, got {res:?}");
+    assert!(
+        res.is_err(),
+        "expected error for missing content, got {res:?}"
+    );
 
     let mut b = bob;
     b.client.disconnect().await.ok();
@@ -410,12 +477,25 @@ async fn megolm_import_roundtrip() {
     let info = alice_low.megolm().create(group_id).await.expect("create");
     bob_low
         .megolm()
-        .import(group_id, info.megolm_session_id.clone(), info.session_key.clone())
+        .import(
+            group_id,
+            info.megolm_session_id.clone(),
+            info.session_key.clone(),
+        )
         .await
         .expect("import");
 
-    let enc = alice_low.megolm().encrypt(group_id, "imported-ok").await.unwrap();
-    let pt = bob_low.megolm().decrypt(group_id, &enc).await.unwrap().unwrap();
+    let enc = alice_low
+        .megolm()
+        .encrypt(group_id, "imported-ok")
+        .await
+        .unwrap();
+    let pt = bob_low
+        .megolm()
+        .decrypt(group_id, &enc)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pt, "imported-ok");
 
     let mut a = alice;
@@ -454,7 +534,9 @@ async fn megolm_share_group_key_via_olm_session() {
         .expect("share");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(td) = evt else { unreachable!() };
+    let Event::ToDevice(td) = evt else {
+        unreachable!()
+    };
 
     let bob_curve = {
         let acc = bob_low.store().account().await;

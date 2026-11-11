@@ -1,7 +1,7 @@
 //! `to_device` payload and related types.
 
-use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// One encrypted `to_device` ciphertext, keyed by the recipient's identity
 /// key in [`ToDevicePayload::ciphertext`].

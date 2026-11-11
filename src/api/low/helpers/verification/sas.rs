@@ -23,14 +23,70 @@ const SAS_MAC: &str = "ln.encryption.key.verification.mac";
 const SAS_METHOD: &str = "ln.encryption.key.verification.sas.v1";
 
 const SAS_EMOJI: [(&str, &str); 64] = [
-    ("🐶","Dog"),("🐱","Cat"),("🦁","Lion"),("🐎","Horse"),("🦄","Unicorn"),("🐷","Pig"),("🐘","Elephant"),("🐰","Rabbit"),
-    ("🐼","Panda"),("🐓","Rooster"),("🐧","Penguin"),("🐢","Turtle"),("🐟","Fish"),("🐙","Octopus"),("🦋","Butterfly"),("🌷","Flower"),
-    ("🌳","Tree"),("🌵","Cactus"),("🍄","Mushroom"),("🌏","Globe"),("🌙","Moon"),("☁️","Cloud"),("🔥","Fire"),("🍌","Banana"),
-    ("🍎","Apple"),("🍓","Strawberry"),("🌽","Corn"),("🍕","Pizza"),("🎂","Cake"),("❤️","Heart"),("🙂","Smiley"),("🤖","Robot"),
-    ("🎩","Hat"),("👓","Glasses"),("🔧","Spanner"),("🎅","Santa"),("👍","Thumbs Up"),("☂️","Umbrella"),("⌛","Hourglass"),("⏰","Clock"),
-    ("🎁","Gift"),("💡","Light Bulb"),("📕","Book"),("✏️","Pencil"),("📎","Paperclip"),("🔒","Lock"),("🔑","Key"),("🔨","Hammer"),
-    ("☎️","Telephone"),("🏁","Flag"),("🚂","Train"),("🚲","Bicycle"),("✈️","Aeroplane"),("🚀","Rocket"),("🎸","Guitar"),("🎺","Trumpet"),
-    ("🔔","Bell"),("⚓","Anchor"),("🎧","Headphones"),("📁","Folder"),("📌","Pin"),("✂️","Scissors"),("🔐","Lock with Key"),("🔓","Unlocked"),
+    ("🐶", "Dog"),
+    ("🐱", "Cat"),
+    ("🦁", "Lion"),
+    ("🐎", "Horse"),
+    ("🦄", "Unicorn"),
+    ("🐷", "Pig"),
+    ("🐘", "Elephant"),
+    ("🐰", "Rabbit"),
+    ("🐼", "Panda"),
+    ("🐓", "Rooster"),
+    ("🐧", "Penguin"),
+    ("🐢", "Turtle"),
+    ("🐟", "Fish"),
+    ("🐙", "Octopus"),
+    ("🦋", "Butterfly"),
+    ("🌷", "Flower"),
+    ("🌳", "Tree"),
+    ("🌵", "Cactus"),
+    ("🍄", "Mushroom"),
+    ("🌏", "Globe"),
+    ("🌙", "Moon"),
+    ("☁️", "Cloud"),
+    ("🔥", "Fire"),
+    ("🍌", "Banana"),
+    ("🍎", "Apple"),
+    ("🍓", "Strawberry"),
+    ("🌽", "Corn"),
+    ("🍕", "Pizza"),
+    ("🎂", "Cake"),
+    ("❤️", "Heart"),
+    ("🙂", "Smiley"),
+    ("🤖", "Robot"),
+    ("🎩", "Hat"),
+    ("👓", "Glasses"),
+    ("🔧", "Spanner"),
+    ("🎅", "Santa"),
+    ("👍", "Thumbs Up"),
+    ("☂️", "Umbrella"),
+    ("⌛", "Hourglass"),
+    ("⏰", "Clock"),
+    ("🎁", "Gift"),
+    ("💡", "Light Bulb"),
+    ("📕", "Book"),
+    ("✏️", "Pencil"),
+    ("📎", "Paperclip"),
+    ("🔒", "Lock"),
+    ("🔑", "Key"),
+    ("🔨", "Hammer"),
+    ("☎️", "Telephone"),
+    ("🏁", "Flag"),
+    ("🚂", "Train"),
+    ("🚲", "Bicycle"),
+    ("✈️", "Aeroplane"),
+    ("🚀", "Rocket"),
+    ("🎸", "Guitar"),
+    ("🎺", "Trumpet"),
+    ("🔔", "Bell"),
+    ("⚓", "Anchor"),
+    ("🎧", "Headphones"),
+    ("📁", "Folder"),
+    ("📌", "Pin"),
+    ("✂️", "Scissors"),
+    ("🔐", "Lock with Key"),
+    ("🔓", "Unlocked"),
 ];
 
 /// One emoji from the SAS string.
@@ -77,12 +133,15 @@ struct SasHandshake {
 }
 
 impl SasHandshake {
-    fn new() -> Self {
-        let mut sk = [0u8; 32];
-        getrandom::getrandom(&mut sk).expect("getrandom");
+    fn new() -> Result<Self> {
+        let sk = crate::core::crypto::random::random_bytes::<32>()?;
         let our_secret = StaticSecret::from(sk);
         let our_public = PublicKey::from(&our_secret);
-        Self { our_secret, our_public, shared: None }
+        Ok(Self {
+            our_secret,
+            our_public,
+            shared: None,
+        })
     }
 
     fn public_b64(&self) -> String {
@@ -92,9 +151,10 @@ impl SasHandshake {
     fn set_their_public(&mut self, their_pub_b64: &str) -> Result<()> {
         let raw = decode_b64(their_pub_b64)?;
         if raw.len() != 32 {
-            return Err(LockNetError::InvalidResponse(
-                format!("sas peer key must be 32 bytes, got {}", raw.len()),
-            ));
+            return Err(LockNetError::InvalidResponse(format!(
+                "sas peer key must be 32 bytes, got {}",
+                raw.len()
+            )));
         }
         let mut arr = [0u8; 32];
         arr.copy_from_slice(&raw);
@@ -190,12 +250,12 @@ impl SasFlow {
         our_msk_b64: String,
         our_ed25519_b64: String,
     ) -> Result<Self> {
-        let txid = generate_txid();
+        let txid = generate_txid()?;
         let flow = Self {
             txid: txid.clone(),
             to_user,
             to_session,
-            handshake: Some(SasHandshake::new()),
+            handshake: Some(SasHandshake::new()?),
             status: SasStatus::WaitingAccept,
             computed_emoji: None,
             olm,
@@ -205,15 +265,19 @@ impl SasFlow {
             peer_ed25519_b64: None,
             peer_msk_b64: None,
         };
-        flow.send_sas_message(SAS_START, json!({
-            "from_session": to_session.to_string(),
-            "method": SAS_METHOD,
-            "transaction_id": txid,
-            "key_agreement_protocols": ["curve25519"],
-            "hashes": ["sha256"],
-            "message_authentication_codes": ["hkdf-hmac-sha256"],
-            "short_authentication_string": ["emoji"],
-        })).await?;
+        flow.send_sas_message(
+            SAS_START,
+            json!({
+                "from_session": to_session.to_string(),
+                "method": SAS_METHOD,
+                "transaction_id": txid,
+                "key_agreement_protocols": ["curve25519"],
+                "hashes": ["sha256"],
+                "message_authentication_codes": ["hkdf-hmac-sha256"],
+                "short_authentication_string": ["emoji"],
+            }),
+        )
+        .await?;
         Ok(flow)
     }
 
@@ -234,7 +298,7 @@ impl SasFlow {
             txid,
             to_user,
             to_session,
-            handshake: Some(SasHandshake::new()),
+            handshake: Some(SasHandshake::new()?),
             status: SasStatus::WaitingKey,
             computed_emoji: None,
             olm,
@@ -250,13 +314,19 @@ impl SasFlow {
     }
 
     /// Transaction ID of this flow.
-    pub fn transaction_id(&self) -> &str { &self.txid }
+    pub fn transaction_id(&self) -> &str {
+        &self.txid
+    }
 
     /// Current status.
-    pub fn check_status(&self) -> SasStatus { self.status.clone() }
+    pub fn check_status(&self) -> SasStatus {
+        self.status.clone()
+    }
 
     /// Computed emoji, if the flow has reached [`SasStatus::NeedUserConfirmation`].
-    pub fn emoji(&self) -> Option<&[SasEmoji]> { self.computed_emoji.as_deref() }
+    pub fn emoji(&self) -> Option<&[SasEmoji]> {
+        self.computed_emoji.as_deref()
+    }
 
     /// Set the peer's public keys (ed25519 identity + cross-signing MSK).
     ///
@@ -290,7 +360,9 @@ impl SasFlow {
                     self.wait_for_key().await?;
                     let emoji = self.compute_emoji()?;
                     self.computed_emoji = Some(emoji.clone());
-                    self.status = SasStatus::NeedUserConfirmation { emoji: emoji.clone() };
+                    self.status = SasStatus::NeedUserConfirmation {
+                        emoji: emoji.clone(),
+                    };
                     return Ok(SasStep::Emoji(emoji));
                 }
                 SasStatus::NeedUserConfirmation { .. } => {
@@ -348,19 +420,26 @@ impl SasFlow {
     }
 
     async fn send_accept(&self) -> Result<()> {
-        self.send_sas_message(SAS_ACCEPT, json!({
-            "transaction_id": self.txid,
-            "method": SAS_METHOD,
-            "key_agreement_protocol": "curve25519",
-            "hash": "sha256",
-            "message_authentication_code": "hkdf-hmac-sha256",
-            "short_authentication_string": ["emoji"],
-        })).await
+        self.send_sas_message(
+            SAS_ACCEPT,
+            json!({
+                "transaction_id": self.txid,
+                "method": SAS_METHOD,
+                "key_agreement_protocol": "curve25519",
+                "hash": "sha256",
+                "message_authentication_code": "hkdf-hmac-sha256",
+                "short_authentication_string": ["emoji"],
+            }),
+        )
+        .await
     }
 
     async fn send_sas_message(&self, kind: &str, content: Value) -> Result<()> {
         let pt = json!({ "type": kind, "content": content }).to_string();
-        self.olm.send(self.to_user, self.to_session, pt).wait().await
+        self.olm
+            .send(self.to_user, self.to_session, pt)
+            .wait()
+            .await
     }
 
     async fn wait_for_sas(&mut self, expected_type: &str) -> Result<Value> {
@@ -388,31 +467,40 @@ impl SasFlow {
     }
 
     async fn send_key(&self) -> Result<()> {
-        let hs = self.handshake.as_ref().ok_or_else(|| {
-            LockNetError::InvalidResponse("SAS handshake consumed".into())
-        })?;
+        let hs = self
+            .handshake
+            .as_ref()
+            .ok_or_else(|| LockNetError::InvalidResponse("SAS handshake consumed".into()))?;
         let pub_b64 = hs.public_b64();
-        self.send_sas_message(SAS_KEY, json!({
-            "transaction_id": self.txid,
-            "key": pub_b64,
-        })).await
+        self.send_sas_message(
+            SAS_KEY,
+            json!({
+                "transaction_id": self.txid,
+                "key": pub_b64,
+            }),
+        )
+        .await
     }
 
     async fn wait_for_key(&mut self) -> Result<()> {
         let content = self.wait_for_sas(SAS_KEY).await?;
-        let key_b64 = content.get("key").and_then(|v| v.as_str())
+        let key_b64 = content
+            .get("key")
+            .and_then(|v| v.as_str())
             .ok_or_else(|| LockNetError::InvalidResponse("no key".into()))?;
-        let hs = self.handshake.as_mut().ok_or_else(|| {
-            LockNetError::InvalidResponse("SAS handshake consumed".into())
-        })?;
+        let hs = self
+            .handshake
+            .as_mut()
+            .ok_or_else(|| LockNetError::InvalidResponse("SAS handshake consumed".into()))?;
         hs.set_their_public(key_b64)?;
         Ok(())
     }
 
     fn compute_emoji(&self) -> Result<Vec<SasEmoji>> {
-        let hs = self.handshake.as_ref().ok_or_else(|| {
-            LockNetError::InvalidResponse("SAS handshake not established".into())
-        })?;
+        let hs = self
+            .handshake
+            .as_ref()
+            .ok_or_else(|| LockNetError::InvalidResponse("SAS handshake not established".into()))?;
         let info = format!("{}{}", SAS_INFO_PREFIX, self.txid);
         let bytes = hs.generate_bytes(info.as_bytes(), 6)?;
         let indices = emoji_indices(&bytes);
@@ -425,18 +513,23 @@ impl SasFlow {
     }
 
     async fn send_mac(&self) -> Result<()> {
-        let hs = self.handshake.as_ref().ok_or_else(|| {
-            LockNetError::InvalidResponse("SAS handshake not established".into())
-        })?;
+        let hs = self
+            .handshake
+            .as_ref()
+            .ok_or_else(|| LockNetError::InvalidResponse("SAS handshake not established".into()))?;
         let ed_mac = hs.calculate_mac(self.our_ed25519_b64.as_bytes(), b"ed25519")?;
         let msk_mac = hs.calculate_mac(self.our_msk_b64.as_bytes(), b"master")?;
-        self.send_sas_message(SAS_MAC, json!({
-            "transaction_id": self.txid,
-            "mac": {
-                "ed25519": b64_no_pad(&ed_mac),
-                "master":  b64_no_pad(&msk_mac),
-            }
-        })).await
+        self.send_sas_message(
+            SAS_MAC,
+            json!({
+                "transaction_id": self.txid,
+                "mac": {
+                    "ed25519": b64_no_pad(&ed_mac),
+                    "master":  b64_no_pad(&msk_mac),
+                }
+            }),
+        )
+        .await
     }
 
     async fn try_recv_mac(&mut self) -> Result<Option<bool>> {
@@ -451,10 +544,16 @@ impl SasFlow {
                     if let Some(pt) = self.olm.decrypt(payload).wait().await? {
                         if let Ok(val) = serde_json::from_str::<Value>(&pt) {
                             if val.get("type").and_then(|v| v.as_str()) == Some(SAS_MAC) {
-                                let their_ed = val.pointer("/content/mac/ed25519")
-                                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                                let their_msk = val.pointer("/content/mac/master")
-                                    .and_then(|v| v.as_str()).unwrap_or("").to_string();
+                                let their_ed = val
+                                    .pointer("/content/mac/ed25519")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
+                                let their_msk = val
+                                    .pointer("/content/mac/master")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string();
 
                                 let peer_ed = self.peer_ed25519_b64.clone().ok_or_else(|| {
                                     LockNetError::InvalidArgument("peer ed25519 not set".into())
@@ -464,14 +563,31 @@ impl SasFlow {
                                 })?;
 
                                 let hs = self.handshake.as_ref().ok_or_else(|| {
-                                    LockNetError::InvalidResponse("SAS handshake not established".into())
+                                    LockNetError::InvalidResponse(
+                                        "SAS handshake not established".into(),
+                                    )
                                 })?;
 
-                                let expected_ed = b64_no_pad(&hs.calculate_mac(peer_ed.as_bytes(), b"ed25519")?);
-                                let expected_msk = b64_no_pad(&hs.calculate_mac(peer_msk.as_bytes(), b"master")?);
+                                use subtle::ConstantTimeEq;
 
-                                let ok = normalize_b64(&their_ed) == expected_ed
-                                    && normalize_b64(&their_msk) == expected_msk;
+                                let expected_ed =
+                                    b64_no_pad(&hs.calculate_mac(peer_ed.as_bytes(), b"ed25519")?);
+                                let expected_msk =
+                                    b64_no_pad(&hs.calculate_mac(peer_msk.as_bytes(), b"master")?);
+
+                                let their_ed_norm = normalize_b64(&their_ed);
+                                let their_msk_norm = normalize_b64(&their_msk);
+
+                                // Constant-time comparison: MACs must not leak timing info.
+                                let ed_eq: bool = their_ed_norm
+                                    .as_bytes()
+                                    .ct_eq(expected_ed.as_bytes())
+                                    .into();
+                                let msk_eq: bool = their_msk_norm
+                                    .as_bytes()
+                                    .ct_eq(expected_msk.as_bytes())
+                                    .into();
+                                let ok = ed_eq & msk_eq;
                                 return Ok(Some(ok));
                             }
                         }
@@ -501,8 +617,6 @@ fn normalize_b64(s: &str) -> String {
     s.trim_end_matches('=').to_string()
 }
 
-fn generate_txid() -> String {
-    let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes).expect("getrandom");
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+fn generate_txid() -> Result<String> {
+    crate::core::crypto::random::random_txid()
 }

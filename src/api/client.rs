@@ -113,7 +113,9 @@ impl LockNetClient {
     }
 
     /// The config this client was created with.
-    pub fn config(&self) -> &LockNetConfig { &self.config }
+    pub fn config(&self) -> &LockNetConfig {
+        &self.config
+    }
 
     /// Current session context, or `None` if [`Self::connection_request`]
     /// has not been called.
@@ -124,7 +126,9 @@ impl LockNetClient {
     /// Low-level agent, or `None` if not connected.
     ///
     /// Use this for direct method calls without the high-level object model.
-    pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> { self.low_agent.clone() }
+    pub fn get_low_agent(&self) -> Option<Arc<LockNetLowAgent>> {
+        self.low_agent.clone()
+    }
 
     /// High-level agent, or `None` if not connected.
     ///
@@ -139,7 +143,9 @@ impl LockNetClient {
     }
 
     /// The underlying [`CryptoStore`].
-    pub fn store(&self) -> Arc<dyn CryptoStore> { self.store.clone() }
+    pub fn store(&self) -> Arc<dyn CryptoStore> {
+        self.store.clone()
+    }
 
     /// Establish a session with the server.
     ///
@@ -157,20 +163,49 @@ impl LockNetClient {
     /// - [`LockNetError::SessionExpired`] for an invalid refresh token.
     /// - [`LockNetError::RunnerDown`] / [`LockNetError::Ws`] / [`LockNetError::Http`]
     ///   on transport failures.
-    pub async fn connection_request(&mut self, creds: Credentials) -> Result<LockNetSessionContext> {
+    #[tracing::instrument(
+        skip(self, creds),
+        fields(
+            creds_kind = match &creds {
+                Credentials::Login { .. } => "login",
+                Credentials::Register { .. } => "register",
+                Credentials::Session { .. } => "session",
+            },
+            user_id = tracing::field::Empty,
+            session_id = tracing::field::Empty,
+        )
+    )]
+    pub async fn connection_request(
+        &mut self,
+        creds: Credentials,
+    ) -> Result<LockNetSessionContext> {
         if self.runner.is_some() {
             self.disconnect().await?;
         }
 
-        let is_fresh = matches!(creds, Credentials::Login { .. } | Credentials::Register { .. });
+        let is_fresh = matches!(
+            creds,
+            Credentials::Login { .. } | Credentials::Register { .. }
+        );
 
         let (user_id, ajwt, rjwt) = match creds {
             Credentials::Login { username, password } => {
                 let r = http::login(&self.config, &self.http, &username, &password).await?;
                 (r.user_id, r.access_token, r.refresh_token)
             }
-            Credentials::Register { username, password, display_name } => {
-                let r = http::register(&self.config, &self.http, &username, &password, display_name.as_deref()).await?;
+            Credentials::Register {
+                username,
+                password,
+                display_name,
+            } => {
+                let r = http::register(
+                    &self.config,
+                    &self.http,
+                    &username,
+                    &password,
+                    display_name.as_deref(),
+                )
+                .await?;
                 (r.user_id, r.access_token, r.refresh_token)
             }
             Credentials::Session { refresh_jwt } => {
@@ -199,7 +234,9 @@ impl LockNetClient {
             Ok(Ok(_)) => {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
                 let _ = raw_cmd_tx.send(Cmd::Shutdown { reply: tx }).await;
-                return Err(LockNetError::InvalidResponse("server did not return session_id in auth_ok".into()));
+                return Err(LockNetError::InvalidResponse(
+                    "server did not return session_id in auth_ok".into(),
+                ));
             }
             Ok(Err(e)) => {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -251,8 +288,11 @@ impl LockNetClient {
                 keys
             };
 
-            let upload: Result<crate::api::low::models::OtkCounts> =
-                dispatch(&cmd_tx, json!({ "type": "upload_keys", "data": device_keys })).await;
+            let upload: Result<crate::api::low::models::OtkCounts> = dispatch(
+                &cmd_tx,
+                json!({ "type": "upload_keys", "data": device_keys }),
+            )
+            .await;
 
             if let Err(e) = upload {
                 let (tx, _rx) = tokio::sync::oneshot::channel();
@@ -266,9 +306,14 @@ impl LockNetClient {
             let _ = low_agent.events().sync_until_empty(100).await;
         }
 
-        self.runner = Some(RunnerHandle { shutdown: raw_cmd_tx, join });
+        self.runner = Some(RunnerHandle {
+            shutdown: raw_cmd_tx,
+            join,
+        });
         self.low_agent = Some(low_agent);
 
+        tracing::Span::current().record("user_id", ctx.user_id);
+        tracing::Span::current().record("session_id", ctx.session_id);
         Ok(ctx)
     }
 
@@ -299,11 +344,16 @@ impl LockNetClient {
 }
 
 fn extract_sub(jwt: &str) -> Result<i64> {
-    let payload = jwt.split('.').nth(1)
+    let payload = jwt
+        .split('.')
+        .nth(1)
         .ok_or_else(|| LockNetError::InvalidResponse("jwt: no payload".into()))?;
-    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(payload)
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
         .map_err(|_| LockNetError::InvalidResponse("jwt: bad b64".into()))?;
     let v: serde_json::Value = serde_json::from_slice(&bytes)?;
-    v.get("sub").and_then(|s| s.as_str()).and_then(|s| s.parse::<i64>().ok())
+    v.get("sub")
+        .and_then(|s| s.as_str())
+        .and_then(|s| s.parse::<i64>().ok())
         .ok_or_else(|| LockNetError::InvalidResponse("jwt: no sub".into()))
 }

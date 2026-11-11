@@ -1,14 +1,16 @@
 //! Messages helper: send, get, edit, delete, reactions.
 
-use serde_json::json;
 use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
+use serde_json::json;
 
 /// Wraps the `/api/v1/messages` WebSocket methods.
 ///
 /// Obtained via [`crate::LockNetLowAgent::messages`].
-pub struct LockNetMessagesHelper { pub(crate) cmd_tx: CmdSender }
+pub struct LockNetMessagesHelper {
+    pub(crate) cmd_tx: CmdSender,
+}
 
 impl LockNetMessagesHelper {
     /// Send an encrypted message to `chat_id`.
@@ -75,7 +77,11 @@ impl LockNetMessagesHelper {
     /// - [`crate::LockNetError::Server`] with code `forbidden` if the caller is
     ///   neither the author nor a moderator.
     pub async fn delete(&self, message_id: i64) -> Result<()> {
-        dispatch_unit(&self.cmd_tx, json!({ "type": "delete_message", "data": { "message_id": message_id } })).await
+        dispatch_unit(
+            &self.cmd_tx,
+            json!({ "type": "delete_message", "data": { "message_id": message_id } }),
+        )
+        .await
     }
 
     /// Add a reaction.

@@ -63,9 +63,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -286,11 +295,26 @@ async fn backup_multiple_versions_increment() {
     let user = common::register_new("bk_multi").await;
     let low = user.low();
 
-    let v1 = low.backup().new_version("ln.encryption.backup.v1", json!({"n": 1})).await.expect("new #1");
-    let v2 = low.backup().new_version("ln.encryption.backup.v1", json!({"n": 2})).await.expect("new #2");
-    let v3 = low.backup().new_version("ln.encryption.backup.v1", json!({"n": 3})).await.expect("new #3");
+    let v1 = low
+        .backup()
+        .new_version("ln.encryption.backup.v1", json!({"n": 1}))
+        .await
+        .expect("new #1");
+    let v2 = low
+        .backup()
+        .new_version("ln.encryption.backup.v1", json!({"n": 2}))
+        .await
+        .expect("new #2");
+    let v3 = low
+        .backup()
+        .new_version("ln.encryption.backup.v1", json!({"n": 3}))
+        .await
+        .expect("new #3");
 
-    assert!(v1 < v2 && v2 < v3, "versions must increment: {v1} < {v2} < {v3}");
+    assert!(
+        v1 < v2 && v2 < v3,
+        "versions must increment: {v1} < {v2} < {v3}"
+    );
 
     let versions = low.backup().versions().await.expect("versions");
     assert_eq!(versions.len(), 3);
@@ -319,7 +343,10 @@ async fn backup_isolated_between_users() {
         .await
         .expect("alice new");
     let mut items = HashMap::new();
-    items.insert("alice_only".to_string(), json!({"nonce": "n", "ciphertext": "c"}));
+    items.insert(
+        "alice_only".to_string(),
+        json!({"nonce": "n", "ciphertext": "c"}),
+    );
     alice_low.backup().put(v, items).await.expect("alice put");
 
     let bob_versions = bob_low.backup().versions().await.expect("bob versions");
@@ -358,17 +385,31 @@ async fn backup_export_import_roundtrip() {
     let group_id = common::setup_group_with_two(&alice, &bob, "BkRoundtrip").await;
 
     let info = alice_low.megolm().create(group_id).await.expect("create");
-    let enc = alice_low.megolm().encrypt(group_id, "secret payload").await.unwrap();
-    let _ack = alice_low.messages().send(group_id, enc.clone()).await.unwrap();
+    let enc = alice_low
+        .megolm()
+        .encrypt(group_id, "secret payload")
+        .await
+        .unwrap();
+    let _ack = alice_low
+        .messages()
+        .send(group_id, enc.clone())
+        .await
+        .unwrap();
 
-    let recovery = RecoveryKey::generate();
+    let recovery = RecoveryKey::generate().expect("RNG");
     let export = alice_low.backup().export(&recovery).await.expect("export");
 
     assert!(export.version >= 1);
-    assert_eq!(export.items_uploaded, 1, "expected exactly one Megolm session");
+    assert_eq!(
+        export.items_uploaded, 1,
+        "expected exactly one Megolm session"
+    );
 
     let versions = alice_low.backup().versions().await.expect("versions");
-    let found = versions.iter().find(|v| v.version == export.version).expect("version");
+    let found = versions
+        .iter()
+        .find(|v| v.version == export.version)
+        .expect("version");
     assert_eq!(found.algorithm, "ln.encryption.backup.v1");
     assert!(found.auth_data.get("public_key").is_some());
 
@@ -383,7 +424,12 @@ async fn backup_export_import_roundtrip() {
     assert_eq!(alice2_session.user_id, alice.session.user_id);
     let alice2_low = alice2_client.get_low_agent().expect("alice2 low");
 
-    assert!(alice2_low.megolm().decrypt(group_id, &enc).await.unwrap().is_none());
+    assert!(alice2_low
+        .megolm()
+        .decrypt(group_id, &enc)
+        .await
+        .unwrap()
+        .is_none());
 
     let import = alice2_low
         .backup()
@@ -426,11 +472,19 @@ async fn backup_wrong_recovery_key_fails() {
     let group_id = common::setup_group_with_two(&alice, &bob, "BkWrongRK").await;
 
     alice_low.megolm().create(group_id).await.expect("create");
-    let enc = alice_low.megolm().encrypt(group_id, "payload").await.unwrap();
+    let enc = alice_low
+        .megolm()
+        .encrypt(group_id, "payload")
+        .await
+        .unwrap();
     alice_low.messages().send(group_id, enc).await.unwrap();
 
-    let real_recovery = RecoveryKey::generate();
-    let export = alice_low.backup().export(&real_recovery).await.expect("export");
+    let real_recovery = RecoveryKey::generate().expect("RNG");
+    let export = alice_low
+        .backup()
+        .export(&real_recovery)
+        .await
+        .expect("export");
 
     let mut alice2_client = LockNetClient::new(common::test_config());
     alice2_client
@@ -442,7 +496,7 @@ async fn backup_wrong_recovery_key_fails() {
         .expect("alice2 login");
     let alice2_low = alice2_client.get_low_agent().expect("alice2 low");
 
-    let wrong_recovery = RecoveryKey::generate();
+    let wrong_recovery = RecoveryKey::generate().expect("RNG");
     let err = alice2_low
         .backup()
         .import(export.version, &wrong_recovery)
@@ -474,7 +528,7 @@ async fn backup_empty_store_exports_zero_items() {
     setup_full(&alice).await;
 
     let alice_low = alice.low();
-    let recovery = RecoveryKey::generate();
+    let recovery = RecoveryKey::generate().expect("RNG");
     let export = alice_low.backup().export(&recovery).await.expect("export");
 
     assert!(export.version >= 1);
@@ -508,17 +562,29 @@ async fn backup_multi_session() {
 
     let info1 = alice_low.megolm().create(group1).await.expect("create g1");
     let enc1 = alice_low.megolm().encrypt(group1, "g1 msg").await.unwrap();
-    alice_low.messages().send(group1, enc1.clone()).await.unwrap();
+    alice_low
+        .messages()
+        .send(group1, enc1.clone())
+        .await
+        .unwrap();
 
     let info2 = alice_low.megolm().create(group2).await.expect("create g2");
     let enc2 = alice_low.megolm().encrypt(group2, "g2 msg").await.unwrap();
-    alice_low.messages().send(group2, enc2.clone()).await.unwrap();
+    alice_low
+        .messages()
+        .send(group2, enc2.clone())
+        .await
+        .unwrap();
 
     let info1b = alice_low.megolm().rotate(group1).await.expect("rotate g1");
     let enc1b = alice_low.megolm().encrypt(group1, "g1 msg2").await.unwrap();
-    alice_low.messages().send(group1, enc1b.clone()).await.unwrap();
+    alice_low
+        .messages()
+        .send(group1, enc1b.clone())
+        .await
+        .unwrap();
 
-    let recovery = RecoveryKey::generate();
+    let recovery = RecoveryKey::generate().expect("RNG");
     let export = alice_low.backup().export(&recovery).await.expect("export");
     assert_eq!(export.items_uploaded, 3, "expected 3 Megolm sessions");
 
@@ -540,15 +606,30 @@ async fn backup_multi_session() {
     assert_eq!(import.sessions_imported, 3);
 
     assert_eq!(
-        alice2_low.megolm().decrypt(group1, &enc1).await.unwrap().unwrap(),
+        alice2_low
+            .megolm()
+            .decrypt(group1, &enc1)
+            .await
+            .unwrap()
+            .unwrap(),
         "g1 msg"
     );
     assert_eq!(
-        alice2_low.megolm().decrypt(group2, &enc2).await.unwrap().unwrap(),
+        alice2_low
+            .megolm()
+            .decrypt(group2, &enc2)
+            .await
+            .unwrap()
+            .unwrap(),
         "g2 msg"
     );
     assert_eq!(
-        alice2_low.megolm().decrypt(group1, &enc1b).await.unwrap().unwrap(),
+        alice2_low
+            .megolm()
+            .decrypt(group1, &enc1b)
+            .await
+            .unwrap()
+            .unwrap(),
         "g1 msg2"
     );
 
@@ -567,7 +648,7 @@ async fn backup_import_missing_version_fails() {
     setup_full(&alice).await;
     let alice_low = alice.low();
 
-    let recovery = RecoveryKey::generate();
+    let recovery = RecoveryKey::generate().expect("RNG");
     let _export = alice_low.backup().export(&recovery).await.expect("export");
 
     let err = alice_low
@@ -586,18 +667,28 @@ async fn backup_import_missing_version_fails() {
 /// rejected with `InvalidArgument`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn backup_recovery_key_serde() {
-    let rk = RecoveryKey::generate();
+    let rk = RecoveryKey::generate().expect("RNG");
     let b64 = rk.to_base64();
-    assert_eq!(b64.len(), 43, "32 bytes without padding = 43 base64 characters");
+    assert_eq!(
+        b64.len(),
+        43,
+        "32 bytes without padding = 43 base64 characters"
+    );
 
     let recovered = RecoveryKey::from_base64(&b64).expect("from_base64");
     assert_eq!(rk.as_bytes(), recovered.as_bytes());
 
     let err = RecoveryKey::from_base64("short").unwrap_err();
-    assert!(matches!(err, locknet_rcab::LockNetError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        locknet_rcab::LockNetError::InvalidArgument(_)
+    ));
 
     let err = RecoveryKey::from_base64("AAAA").unwrap_err();
-    assert!(matches!(err, locknet_rcab::LockNetError::InvalidArgument(_)));
+    assert!(matches!(
+        err,
+        locknet_rcab::LockNetError::InvalidArgument(_)
+    ));
 }
 
 /// Alice's backup restores history on a new device after Alice1 has "gone
@@ -623,20 +714,37 @@ async fn backup_recovers_history_for_lost_device() {
 
     let group_id = common::setup_group_with_two(&alice, &bob, "BkHist").await;
     let info = alice_low.megolm().create(group_id).await.expect("create");
-    let enc = alice_low.megolm().encrypt(group_id, "historical payload").await.unwrap();
-    let ack = alice_low.messages().send(group_id, enc.clone()).await.unwrap();
+    let enc = alice_low
+        .megolm()
+        .encrypt(group_id, "historical payload")
+        .await
+        .unwrap();
+    let ack = alice_low
+        .messages()
+        .send(group_id, enc.clone())
+        .await
+        .unwrap();
 
     bob_low
         .megolm()
-        .import(group_id, info.megolm_session_id.clone(), info.session_key.clone())
+        .import(
+            group_id,
+            info.megolm_session_id.clone(),
+            info.session_key.clone(),
+        )
         .await
         .expect("bob import");
     assert_eq!(
-        bob_low.megolm().decrypt(group_id, &enc).await.unwrap().unwrap(),
+        bob_low
+            .megolm()
+            .decrypt(group_id, &enc)
+            .await
+            .unwrap()
+            .unwrap(),
         "historical payload"
     );
 
-    let recovery = RecoveryKey::generate();
+    let recovery = RecoveryKey::generate().expect("RNG");
     let export = alice_low.backup().export(&recovery).await.expect("export");
     assert_eq!(export.items_uploaded, 1);
 
@@ -655,7 +763,12 @@ async fn backup_recovers_history_for_lost_device() {
     // Session credentials do not trigger upload_keys; do it manually.
     upload_keys_for_low(&alice2_low).await;
 
-    assert!(alice2_low.megolm().decrypt(group_id, &enc).await.unwrap().is_none());
+    assert!(alice2_low
+        .megolm()
+        .decrypt(group_id, &enc)
+        .await
+        .unwrap()
+        .is_none());
 
     let import = alice2_low
         .backup()

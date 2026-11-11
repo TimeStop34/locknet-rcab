@@ -1,10 +1,9 @@
 //! Megolm session primitives: create, encrypt, import, decrypt.
 
-use vodozemac::megolm::{
-    ExportedSessionKey, GroupSession, InboundGroupSession, MegolmMessage, SessionConfig,
-    SessionKey,
-};
 use crate::core::errors::{LockNetError, Result};
+use vodozemac::megolm::{
+    ExportedSessionKey, GroupSession, InboundGroupSession, MegolmMessage, SessionConfig, SessionKey,
+};
 
 /// Wire identifier for Megolm sessions.
 pub const MEGOLM_ALGORITHM: &str = "ln.encryption.megolm.v1";
@@ -47,7 +46,10 @@ pub fn import_inbound(session_key_b64: &str) -> Result<InboundGroupSession> {
         return Ok(InboundGroupSession::new(&key, SessionConfig::version_1()));
     }
     if let Ok(key) = ExportedSessionKey::from_base64(session_key_b64) {
-        return Ok(InboundGroupSession::import(&key, SessionConfig::version_1()));
+        return Ok(InboundGroupSession::import(
+            &key,
+            SessionConfig::version_1(),
+        ));
     }
     Err(LockNetError::InvalidResponse(
         "megolm key: invalid v1 or v2 key".into(),
@@ -62,7 +64,11 @@ pub fn import_inbound(session_key_b64: &str) -> Result<InboundGroupSession> {
 /// decryption fails (wrong session, corrupted ciphertext, or unknown message
 /// index), or the plaintext is not valid UTF-8.
 pub fn decrypt_inbound(session: &mut InboundGroupSession, ciphertext_b64: &str) -> Result<String> {
-    let msg = MegolmMessage::from_base64(ciphertext_b64).map_err(|e| LockNetError::InvalidResponse(format!("megolm ct b64: {e}")))?;
-    let result = session.decrypt(&msg).map_err(|e| LockNetError::InvalidResponse(format!("megolm decrypt: {e}")))?;
-    String::from_utf8(result.plaintext).map_err(|e| LockNetError::InvalidResponse(format!("megolm utf8: {e}")))
+    let msg = MegolmMessage::from_base64(ciphertext_b64)
+        .map_err(|e| LockNetError::InvalidResponse(format!("megolm ct b64: {e}")))?;
+    let result = session
+        .decrypt(&msg)
+        .map_err(|e| LockNetError::InvalidResponse(format!("megolm decrypt: {e}")))?;
+    String::from_utf8(result.plaintext)
+        .map_err(|e| LockNetError::InvalidResponse(format!("megolm utf8: {e}")))
 }

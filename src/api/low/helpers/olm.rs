@@ -1,7 +1,5 @@
 //! Olm (1-to-1) send and decrypt.
 
-use std::sync::Arc;
-use serde_json::json;
 use crate::api::low::command::{dispatch, CmdSender};
 use crate::api::low::models::{Otk, QueryKeysResult, ToDevicePayload};
 use crate::core::crypto::olm::{
@@ -11,11 +9,16 @@ use crate::core::crypto::olm::{
 use crate::core::crypto::CryptoStore;
 use crate::core::errors::{LockNetError, Result};
 use crate::core::flow::SimpleFlow;
+use serde_json::json;
+use std::sync::Arc;
 
 /// Wraps Olm encryption with the appropriate `send_to_device` wire calls.
 ///
 /// Obtained via [`crate::LockNetLowAgent::olm`].
-pub struct LockNetOlmHelper { pub(crate) cmd_tx: CmdSender, pub(crate) store: Arc<dyn CryptoStore> }
+pub struct LockNetOlmHelper {
+    pub(crate) cmd_tx: CmdSender,
+    pub(crate) store: Arc<dyn CryptoStore>,
+}
 
 impl LockNetOlmHelper {
     /// Encrypt `plaintext` and send it to a specific device.
@@ -26,11 +29,18 @@ impl LockNetOlmHelper {
     ///
     /// Returns a [`SimpleFlow`]: await it with `.wait().await` or poll it as
     /// a `Future`.
-    pub fn send(&self, to_user_id: i64, to_session_id: i64, plaintext: impl Into<String> + Send + 'static) -> SimpleFlow<()> {
+    pub fn send(
+        &self,
+        to_user_id: i64,
+        to_session_id: i64,
+        plaintext: impl Into<String> + Send + 'static,
+    ) -> SimpleFlow<()> {
         let cmd_tx = self.cmd_tx.clone();
         let store = self.store.clone();
         let plaintext = plaintext.into();
-        SimpleFlow::spawn(async move { send_impl(cmd_tx, store, to_user_id, to_session_id, plaintext).await })
+        SimpleFlow::spawn(async move {
+            send_impl(cmd_tx, store, to_user_id, to_session_id, plaintext).await
+        })
     }
 
     /// Decrypt a `to_device` payload addressed to the current device.
@@ -46,7 +56,13 @@ impl LockNetOlmHelper {
     }
 }
 
-async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i64, to_session_id: i64, plaintext: String) -> Result<()> {
+async fn send_impl(
+    cmd_tx: CmdSender,
+    store: Arc<dyn CryptoStore>,
+    to_user_id: i64,
+    to_session_id: i64,
+    plaintext: String,
+) -> Result<()> {
     let entries = store.olm_sessions(to_session_id).await;
 
     // Prefer sessions that have already received a reply: they encrypt as
@@ -88,8 +104,15 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
     }
 
     // No session yet — claim an OTK and create one.
-    let keys: QueryKeysResult = dispatch(&cmd_tx, json!({ "type": "query_keys", "data": { "user_ids": [to_user_id] } })).await?;
-    let their_curve = keys.get(&to_user_id).and_then(|m| m.get(&to_session_id)).map(|d| d.curve25519_key.clone())
+    let keys: QueryKeysResult = dispatch(
+        &cmd_tx,
+        json!({ "type": "query_keys", "data": { "user_ids": [to_user_id] } }),
+    )
+    .await?;
+    let their_curve = keys
+        .get(&to_user_id)
+        .and_then(|m| m.get(&to_session_id))
+        .map(|d| d.curve25519_key.clone())
         .ok_or_else(|| LockNetError::InvalidResponse("recipient device not found".into()))?;
 
     let otk: Otk = dispatch(&cmd_tx, json!({
@@ -101,7 +124,10 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
     let otk_key = curve_from_b64(&otk.key)?;
 
     let account = store.account().await;
-    let mut session = { let acc = account.lock().await; create_outbound(acc.inner(), their_identity, otk_key) };
+    let mut session = {
+        let acc = account.lock().await;
+        create_outbound(acc.inner(), their_identity, otk_key)
+    };
     let encrypted = encrypt_olm(&mut session, &plaintext);
     let entry = OlmSessionEntry {
         session: Arc::new(tokio::sync::Mutex::new(session)),
@@ -113,7 +139,13 @@ async fn send_impl(cmd_tx: CmdSender, store: Arc<dyn CryptoStore>, to_user_id: i
     Ok(())
 }
 
-async fn send_to_device(cmd_tx: &CmdSender, to_user_id: i64, to_session_id: i64, their_curve: &str, encrypted: &EncryptedOlm) -> Result<()> {
+async fn send_to_device(
+    cmd_tx: &CmdSender,
+    to_user_id: i64,
+    to_session_id: i64,
+    their_curve: &str,
+    encrypted: &EncryptedOlm,
+) -> Result<()> {
     let payload = json!({
         "algorithm": OLM_ALGORITHM,
         "sender_key": "WILL_BE_OVERWRITTEN",
@@ -127,9 +159,15 @@ async fn send_to_device(cmd_tx: &CmdSender, to_user_id: i64, to_session_id: i64,
     Ok(())
 }
 
-async fn decrypt_impl(store: Arc<dyn CryptoStore>, payload: ToDevicePayload) -> Result<Option<String>> {
+async fn decrypt_impl(
+    store: Arc<dyn CryptoStore>,
+    payload: ToDevicePayload,
+) -> Result<Option<String>> {
     if payload.algorithm != OLM_ALGORITHM {
-        return Err(LockNetError::InvalidResponse(format!("unexpected algorithm: {}", payload.algorithm)));
+        return Err(LockNetError::InvalidResponse(format!(
+            "unexpected algorithm: {}",
+            payload.algorithm
+        )));
     }
     let peer_session_id = payload.sender_session_id;
     let our_curve = {
@@ -137,7 +175,10 @@ async fn decrypt_impl(store: Arc<dyn CryptoStore>, payload: ToDevicePayload) -> 
         let acc = account.lock().await;
         acc.curve25519_public_b64()
     };
-    let inner = payload.ciphertext.get(&our_curve).or_else(|| payload.ciphertext.values().next())
+    let inner = payload
+        .ciphertext
+        .get(&our_curve)
+        .or_else(|| payload.ciphertext.values().next())
         .ok_or_else(|| LockNetError::InvalidResponse("no matching ciphertext".into()))?;
 
     let entries = store.olm_sessions(peer_session_id).await;
@@ -161,7 +202,8 @@ async fn decrypt_impl(store: Arc<dyn CryptoStore>, payload: ToDevicePayload) -> 
 
         store.save_account().await;
 
-        let plaintext = String::from_utf8(result.plaintext).map_err(|e| LockNetError::InvalidResponse(format!("olm utf8: {e}")))?;
+        let plaintext = String::from_utf8(result.plaintext)
+            .map_err(|e| LockNetError::InvalidResponse(format!("olm utf8: {e}")))?;
         let entry = OlmSessionEntry {
             session: Arc::new(tokio::sync::Mutex::new(result.session)),
             their_curve25519: payload.sender_key.clone(),

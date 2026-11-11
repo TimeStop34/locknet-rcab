@@ -36,8 +36,7 @@ use tokio::sync::broadcast;
 /// Reads `LOCKNET_TEST_BASE_URL`; defaults to `https://localhost:8000`.
 /// Override when running the server on a non-default port or host.
 pub fn base_url() -> String {
-    std::env::var("LOCKNET_TEST_BASE_URL")
-        .unwrap_or_else(|_| "https://localhost:8000".into())
+    std::env::var("LOCKNET_TEST_BASE_URL").unwrap_or_else(|_| "https://localhost:8000".into())
 }
 
 /// Server namespace (`SPACE` setting).
@@ -125,6 +124,7 @@ impl TestUser {
 /// Use this only when the registration is guaranteed to succeed — typically
 /// the setup phase of a test.
 pub async fn register_new(prefix: &str) -> TestUser {
+    init_tracing();
     let username = format!("{}_{}", prefix, unique_suffix());
     let password = "secret123".to_string();
     let mut client = LockNetClient::new(test_config());
@@ -138,7 +138,12 @@ pub async fn register_new(prefix: &str) -> TestUser {
         .await
         .unwrap_or_else(|e| panic!("register({username}) failed: {e:?}"));
 
-    TestUser { client, session, username, password }
+    TestUser {
+        client,
+        session,
+        username,
+        password,
+    }
 }
 
 /// Build a fake [`locknet_rcab::models::Encrypted`] payload.
@@ -263,4 +268,22 @@ pub fn assert_server_code(err: LockNetError, expected: &str) {
         }
         other => panic!("expected Server({expected}), got {other:?}"),
     }
+}
+
+/// Initialise a tracing subscriber for test output.
+///
+/// Idempotent: safe to call from every test. Honours `RUST_LOG` if set;
+/// otherwise defaults to `locknet_rcab=info`. Uses `.with_test_writer()` so
+/// output is captured by the test harness and shown with `--nocapture`.
+pub fn init_tracing() {
+    use std::sync::Once;
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("locknet_rcab=info"));
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter(filter)
+            .with_test_writer()
+            .try_init();
+    });
 }

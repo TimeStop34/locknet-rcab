@@ -60,9 +60,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -131,7 +140,12 @@ async fn self_is_always_verified() {
     let alice = common::register_new("tg_self_a").await;
     let agent = alice.client.get_agent().expect("agent");
 
-    assert!(agent.security().is_user_verified(alice.session.user_id).await);
+    assert!(
+        agent
+            .security()
+            .is_user_verified(alice.session.user_id)
+            .await
+    );
 }
 
 /// Without a `USK -> MSK` signature, no trust is established.
@@ -149,7 +163,10 @@ async fn no_trust_chain_returns_false() {
     let _ = alice_agent.user_info(bob.session.user_id).await;
 
     assert!(
-        !alice_agent.security().is_user_verified(bob.session.user_id).await,
+        !alice_agent
+            .security()
+            .is_user_verified(bob.session.user_id)
+            .await,
         "without a USK -> MSK signature, trust must be absent"
     );
 }
@@ -174,7 +191,10 @@ async fn direct_trust_via_sas_signature() {
         .expect("alice signs bob msk");
 
     assert!(
-        alice_agent.security().is_user_verified(bob.session.user_id).await,
+        alice_agent
+            .security()
+            .is_user_verified(bob.session.user_id)
+            .await,
         "direct USK -> MSK signature establishes trust"
     );
 }
@@ -199,16 +219,26 @@ async fn transitive_trust_alice_bob_charlie() {
     let _ = alice_agent.user_info(bob.session.user_id).await;
     let _ = alice_agent.user_info(charlie.session.user_id).await;
 
-    sign_msk(&alice_low, &alice_cs, bob.session.user_id).await.expect("alice signs bob");
-    sign_msk(&bob_low, &bob_cs, charlie.session.user_id).await.expect("bob signs charlie");
+    sign_msk(&alice_low, &alice_cs, bob.session.user_id)
+        .await
+        .expect("alice signs bob");
+    sign_msk(&bob_low, &bob_cs, charlie.session.user_id)
+        .await
+        .expect("bob signs charlie");
 
     assert!(
-        alice_agent.security().is_user_verified(bob.session.user_id).await,
+        alice_agent
+            .security()
+            .is_user_verified(bob.session.user_id)
+            .await,
         "Alice -> Bob: direct signature"
     );
 
     assert!(
-        alice_agent.security().is_user_verified(charlie.session.user_id).await,
+        alice_agent
+            .security()
+            .is_user_verified(charlie.session.user_id)
+            .await,
         "Alice -> Bob -> Charlie: transitive trust"
     );
 }
@@ -233,11 +263,18 @@ async fn revoke_breaks_chain() {
     let _ = alice_agent.user_info(bob.session.user_id).await;
     let _ = alice_agent.user_info(charlie.session.user_id).await;
 
-    sign_msk(&alice_low, &alice_cs, bob.session.user_id).await.unwrap();
-    sign_msk(&bob_low, &bob_cs, charlie.session.user_id).await.unwrap();
+    sign_msk(&alice_low, &alice_cs, bob.session.user_id)
+        .await
+        .unwrap();
+    sign_msk(&bob_low, &bob_cs, charlie.session.user_id)
+        .await
+        .unwrap();
 
     assert!(
-        alice_agent.security().is_user_verified(charlie.session.user_id).await,
+        alice_agent
+            .security()
+            .is_user_verified(charlie.session.user_id)
+            .await,
         "the Alice -> Bob -> Charlie chain must be trusted"
     );
 
@@ -264,12 +301,18 @@ async fn revoke_breaks_chain() {
     let _ = fresh_agent.user_info(charlie.session.user_id).await;
 
     assert!(
-        fresh_agent.security().is_user_verified(bob.session.user_id).await,
+        fresh_agent
+            .security()
+            .is_user_verified(bob.session.user_id)
+            .await,
         "direct trust Alice -> Bob must survive"
     );
 
     assert!(
-        !fresh_agent.security().is_user_verified(charlie.session.user_id).await,
+        !fresh_agent
+            .security()
+            .is_user_verified(charlie.session.user_id)
+            .await,
         "after the reset, Charlie must be unreachable in the chain"
     );
 

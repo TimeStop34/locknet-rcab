@@ -1,14 +1,16 @@
 //! Event sync helper.
 
-use serde_json::json;
 use crate::api::low::command::{dispatch, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
+use serde_json::json;
 
 /// Wraps the `event_sync` WebSocket method.
 ///
 /// Obtained via [`crate::LockNetLowAgent::events`].
-pub struct LockNetEventsHelper { pub(crate) cmd_tx: CmdSender }
+pub struct LockNetEventsHelper {
+    pub(crate) cmd_tx: CmdSender,
+}
 
 impl LockNetEventsHelper {
     /// Fetch one batch of queued events.
@@ -34,7 +36,9 @@ impl LockNetEventsHelper {
         for _ in 0..max_iterations {
             let ack = self.sync().await?;
             total += ack.sent as u64;
-            if !ack.more { return Ok(total); }
+            if !ack.more {
+                return Ok(total);
+            }
         }
         Ok(total)
     }

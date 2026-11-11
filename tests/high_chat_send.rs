@@ -90,9 +90,10 @@ async fn alice_sends_bob_decrypts_via_high() {
     assert!(sent.encrypted);
     assert_eq!(sent.text.as_deref(), Some("hello through high"));
 
-    let evt = wait_high_event(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt = wait_high_event(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
 
     match evt {
@@ -107,7 +108,10 @@ async fn alice_sends_bob_decrypts_via_high() {
 
     let bob_chat = bob_agent.chat(group_id).await.expect("bob chat");
     let history = bob_chat.messages(None, 20).await.expect("messages");
-    let found = history.iter().find(|m| m.id == sent.id).expect("message in history");
+    let found = history
+        .iter()
+        .find(|m| m.id == sent.id)
+        .expect("message in history");
     assert_eq!(found.text.as_deref(), Some("hello through high"));
 
     let mut a = alice;
@@ -142,14 +146,29 @@ async fn alice_sends_to_three_participants() {
         .expect("create");
 
     let bob_invites = bob_agent.invites().await.expect("bob invites");
-    let bob_inv = bob_invites.iter().find(|i| i.group.id == group.id()).expect("bob inv");
-    bob_agent.accept_invite(bob_inv.id).await.expect("bob accept");
+    let bob_inv = bob_invites
+        .iter()
+        .find(|i| i.group.id == group.id())
+        .expect("bob inv");
+    bob_agent
+        .accept_invite(bob_inv.id)
+        .await
+        .expect("bob accept");
 
     let charlie_invites = charlie_agent.invites().await.expect("charlie invites");
-    let charlie_inv = charlie_invites.iter().find(|i| i.group.id == group.id()).expect("charlie inv");
-    charlie_agent.accept_invite(charlie_inv.id).await.expect("charlie accept");
+    let charlie_inv = charlie_invites
+        .iter()
+        .find(|i| i.group.id == group.id())
+        .expect("charlie inv");
+    charlie_agent
+        .accept_invite(charlie_inv.id)
+        .await
+        .expect("charlie accept");
 
-    let alice_chat = alice_agent.chat(group.id()).await.expect("alice chat fresh");
+    let alice_chat = alice_agent
+        .chat(group.id())
+        .await
+        .expect("alice chat fresh");
 
     let mut bob_rx = bob_agent.subscribe();
     let mut charlie_rx = charlie_agent.subscribe();
@@ -157,17 +176,19 @@ async fn alice_sends_to_three_participants() {
     let sent = alice_chat.send("to everyone").await.expect("send");
     assert!(sent.encrypted);
 
-    let evt_b = wait_high_event(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt_b = wait_high_event(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
     if let HighEvent::NewMessage { message, .. } = evt_b {
         assert_eq!(message.text.as_deref(), Some("to everyone"));
     }
 
-    let evt_c = wait_high_event(&mut charlie_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt_c = wait_high_event(
+        &mut charlie_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
     if let HighEvent::NewMessage { message, .. } = evt_c {
         assert_eq!(message.text.as_deref(), Some("to everyone"));
@@ -212,9 +233,10 @@ async fn membership_change_rotates_megolm() {
     let first_enc = first.encrypted_payload.clone().expect("first enc");
     let s1 = first_enc.megolm_session_id.clone();
 
-    let _ = wait_high_event(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == first.id)
-    })
+    let _ = wait_high_event(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == first.id),
+    )
     .await;
 
     let pt1 = bob_low
@@ -225,7 +247,11 @@ async fn membership_change_rotates_megolm() {
         .unwrap();
     assert_eq!(pt1, "msg1 pre-bob-leave");
     assert!(
-        bob_low.store().megolm_inbound(group_id, &s1).await.is_some(),
+        bob_low
+            .store()
+            .megolm_inbound(group_id, &s1)
+            .await
+            .is_some(),
         "Bob must have S1"
     );
 
@@ -251,11 +277,19 @@ async fn membership_change_rotates_megolm() {
     assert_ne!(s1, s2, "Megolm must rotate after leave");
 
     assert!(
-        bob_low.store().megolm_inbound(group_id, &s2).await.is_none(),
+        bob_low
+            .store()
+            .megolm_inbound(group_id, &s2)
+            .await
+            .is_none(),
         "Bob must NOT have S2"
     );
     assert!(
-        bob_low.store().megolm_inbound(group_id, &s1).await.is_some(),
+        bob_low
+            .store()
+            .megolm_inbound(group_id, &s1)
+            .await
+            .is_some(),
         "Bob must still have S1"
     );
 
@@ -273,10 +307,7 @@ async fn membership_change_rotates_megolm() {
         .unwrap();
     assert_eq!(pt1_again.as_deref(), Some("msg1 pre-bob-leave"));
 
-    let alice_hist = alice_chat2
-        .messages(None, 20)
-        .await
-        .expect("alice history");
+    let alice_hist = alice_chat2.messages(None, 20).await.expect("alice history");
     assert!(alice_hist
         .iter()
         .any(|m| m.text.as_deref() == Some("msg1 pre-bob-leave")));
@@ -307,10 +338,7 @@ async fn public_group_uses_plaintext() {
         .await
         .expect("create public");
 
-    bob_agent
-        .join_group(public_id)
-        .await
-        .expect("bob join");
+    bob_agent.join_group(public_id).await.expect("bob join");
 
     let mut bob_rx = bob_agent.subscribe();
 
@@ -319,9 +347,10 @@ async fn public_group_uses_plaintext() {
 
     assert!(!sent.encrypted, "public groups use plaintext");
 
-    let evt = wait_high_event(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt = wait_high_event(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
 
     match evt {

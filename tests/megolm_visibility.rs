@@ -72,9 +72,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -82,47 +91,77 @@ async fn setup_cs(low: &LockNetLowAgent) -> CrossSigningKeysPrivate {
     let uid = low.user_id();
     let sid = low.session_id();
     let keys = CrossSigningKeysPrivate::generate();
-    low.crypto().upload_cross_signing_keys(build_cs_payload(uid, &keys)).await.expect("upload cs");
+    low.crypto()
+        .upload_cross_signing_keys(build_cs_payload(uid, &keys))
+        .await
+        .expect("upload cs");
     let own_ed = {
         let acc = low.store().account().await;
         let acc = acc.lock().await;
         acc.ed25519_public_b64()
     };
     let dev_sig = sign_b64(&keys.ssk, &own_ed).expect("sign device");
-    low.crypto().upload_signatures(Signatures {
-        user_signatures: HashMap::new(),
-        device_signatures: [(sid, dev_sig)].into_iter().collect(),
-    }).await.expect("upload device sig");
+    low.crypto()
+        .upload_signatures(Signatures {
+            user_signatures: HashMap::new(),
+            device_signatures: [(sid, dev_sig)].into_iter().collect(),
+        })
+        .await
+        .expect("upload device sig");
     keys
 }
 
 /// Sign the target user's MSK with the signer's USK.
-async fn sign_msk(signer_low: &LockNetLowAgent, signer_keys: &CrossSigningKeysPrivate, target_uid: i64) {
-    let query = signer_low.crypto().query_cross_signing_keys(vec![target_uid]).await.unwrap();
-    let target_msk = query.get(&target_uid).map(|u| u.master_key.key.clone()).unwrap();
+async fn sign_msk(
+    signer_low: &LockNetLowAgent,
+    signer_keys: &CrossSigningKeysPrivate,
+    target_uid: i64,
+) {
+    let query = signer_low
+        .crypto()
+        .query_cross_signing_keys(vec![target_uid])
+        .await
+        .unwrap();
+    let target_msk = query
+        .get(&target_uid)
+        .map(|u| u.master_key.key.clone())
+        .unwrap();
     let sig = sign_b64(&signer_keys.usk, &target_msk).unwrap();
-    signer_low.crypto().upload_signatures(Signatures {
-        user_signatures: [(target_uid, sig)].into_iter().collect(),
-        device_signatures: HashMap::new(),
-    }).await.unwrap();
+    signer_low
+        .crypto()
+        .upload_signatures(Signatures {
+            user_signatures: [(target_uid, sig)].into_iter().collect(),
+            device_signatures: HashMap::new(),
+        })
+        .await
+        .unwrap();
 }
 
 /// Overwrite `GroupDataState.megolm_rotation_visibility` and bump
 /// `version` to defeat the anti-replay check.
 async fn set_megolm_visibility(low: &LockNetLowAgent, chat_id: i64, vis: MegolmRotationVisibility) {
-    use locknet_rcab::core::policies::GroupDataState;
     use locknet_rcab::core::crypto::group_data::encrypt_group_data;
+    use locknet_rcab::core::policies::GroupDataState;
 
-    let state = low.store().group_data_state(chat_id).await.expect("group_data");
+    let state = low
+        .store()
+        .group_data_state(chat_id)
+        .await
+        .expect("group_data");
     let mut data = state.data.clone();
     data.version += 1;
     data.megolm_rotation_visibility = vis;
     let blob = encrypt_group_data(&data, &state.key).expect("re-encrypt");
-    low.store().group_data_state_put(chat_id, GroupDataState {
-        key: state.key,
-        data,
-        blob,
-    }).await;
+    low.store()
+        .group_data_state_put(
+            chat_id,
+            GroupDataState {
+                key: state.key,
+                data,
+                blob,
+            },
+        )
+        .await;
 }
 
 async fn wait_high<F>(rx: &mut broadcast::Receiver<HighEvent>, pred: F) -> HighEvent
@@ -166,9 +205,10 @@ async fn all_members_reaches_everyone() {
     let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
     let sent = alice_chat.send("hello all").await.expect("send");
 
-    let evt = wait_high(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt = wait_high(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
 
     if let HighEvent::NewMessage { message, .. } = evt {
@@ -198,19 +238,46 @@ async fn only_verified_sessions_skips_unverified() {
     setup_cs(&bob_low).await;
 
     let group = alice_agent
-        .create_group("MVOVS", false, None, vec![bob.session.user_id, charlie.session.user_id])
+        .create_group(
+            "MVOVS",
+            false,
+            None,
+            vec![bob.session.user_id, charlie.session.user_id],
+        )
         .await
         .expect("create");
 
-    let bob_inv = bob_agent.invites().await.unwrap().into_iter().find(|i| i.group.id == group.id()).unwrap();
+    let bob_inv = bob_agent
+        .invites()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.group.id == group.id())
+        .unwrap();
     bob_agent.accept_invite(bob_inv.id).await.unwrap();
 
     let charlie_low = charlie.low();
-    let charlie_inv = charlie_low.groups().invites().await.unwrap().into_iter().find(|i| i.group_id == group.id()).unwrap();
-    charlie_low.groups().accept_invite(charlie_inv.id).await.unwrap();
+    let charlie_inv = charlie_low
+        .groups()
+        .invites()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|i| i.group_id == group.id())
+        .unwrap();
+    charlie_low
+        .groups()
+        .accept_invite(charlie_inv.id)
+        .await
+        .unwrap();
 
     alice_low.megolm().create(group.id()).await.unwrap();
-    set_megolm_visibility(&alice_low, group.id(), MegolmRotationVisibility::OnlyVerifiedSessions).await;
+    set_megolm_visibility(
+        &alice_low,
+        group.id(),
+        MegolmRotationVisibility::OnlyVerifiedSessions,
+    )
+    .await;
 
     let mut bob_rx = bob_agent.subscribe();
     let mut charlie_rx = charlie_agent.subscribe();
@@ -218,17 +285,23 @@ async fn only_verified_sessions_skips_unverified() {
     let alice_chat = alice_agent.chat(group.id()).await.unwrap();
     let sent = alice_chat.send("secret").await.unwrap();
 
-    let evt_b = wait_high(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt_b = wait_high(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
     if let HighEvent::NewMessage { message, .. } = evt_b {
-        assert_eq!(message.text.as_deref(), Some("secret"), "Bob must decrypt (session-verified)");
+        assert_eq!(
+            message.text.as_deref(),
+            Some("secret"),
+            "Bob must decrypt (session-verified)"
+        );
     }
 
-    let evt_c = wait_high(&mut charlie_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt_c = wait_high(
+        &mut charlie_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
     if let HighEvent::NewMessage { message, .. } = evt_c {
         assert_eq!(message.text, None, "Charlie must not decrypt (no CS)");
@@ -259,7 +332,12 @@ async fn only_verified_users_skips_untrusted() {
     let group_id = common::setup_group_with_two(&alice, &bob, "MVOVU").await;
 
     alice_low.megolm().create(group_id).await.unwrap();
-    set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::OnlyVerifiedUsers).await;
+    set_megolm_visibility(
+        &alice_low,
+        group_id,
+        MegolmRotationVisibility::OnlyVerifiedUsers,
+    )
+    .await;
 
     let _ = alice_agent.user_info(bob.session.user_id).await;
 
@@ -268,13 +346,17 @@ async fn only_verified_users_skips_untrusted() {
     let alice_chat = alice_agent.chat(group_id).await.unwrap();
     let sent = alice_chat.send("super secret").await.unwrap();
 
-    let evt = wait_high(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt = wait_high(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
 
     if let HighEvent::NewMessage { message, .. } = evt {
-        assert_eq!(message.text, None, "Bob is not user-verified, so he cannot decrypt");
+        assert_eq!(
+            message.text, None,
+            "Bob is not user-verified, so he cannot decrypt"
+        );
     }
 
     let mut a = alice;
@@ -301,7 +383,12 @@ async fn only_verified_users_reaches_after_usk_signature() {
     let group_id = common::setup_group_with_two(&alice, &bob, "MVOVUUSK").await;
 
     alice_low.megolm().create(group_id).await.unwrap();
-    set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::OnlyVerifiedUsers).await;
+    set_megolm_visibility(
+        &alice_low,
+        group_id,
+        MegolmRotationVisibility::OnlyVerifiedUsers,
+    )
+    .await;
 
     let _ = alice_agent.user_info(bob.session.user_id).await;
     sign_msk(&alice_low, &alice_cs, bob.session.user_id).await;
@@ -313,13 +400,18 @@ async fn only_verified_users_reaches_after_usk_signature() {
     let alice_chat = alice_agent.chat(group_id).await.unwrap();
     let sent = alice_chat.send("after usk").await.unwrap();
 
-    let evt = wait_high(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt = wait_high(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
 
     if let HighEvent::NewMessage { message, .. } = evt {
-        assert_eq!(message.text.as_deref(), Some("after usk"), "Bob is now user-verified");
+        assert_eq!(
+            message.text.as_deref(),
+            Some("after usk"),
+            "Bob is now user-verified"
+        );
     }
 
     let mut a = alice;
@@ -346,31 +438,51 @@ async fn rotation_on_membership_respects_policy() {
     let group_id = common::setup_group_with_two(&alice, &bob, "MVRot").await;
 
     alice_low.megolm().create(group_id).await.unwrap();
-    set_megolm_visibility(&alice_low, group_id, MegolmRotationVisibility::OnlyVerifiedSessions).await;
+    set_megolm_visibility(
+        &alice_low,
+        group_id,
+        MegolmRotationVisibility::OnlyVerifiedSessions,
+    )
+    .await;
 
     let mut bob_rx = bob_agent.subscribe();
     let alice_chat = alice_agent.chat(group_id).await.unwrap();
     let sent = alice_chat.send("pre-leave").await.unwrap();
-    let evt = wait_high(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let evt = wait_high(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
     if let HighEvent::NewMessage { message, .. } = evt {
-        assert_eq!(message.text.as_deref(), Some("pre-leave"), "Bob can read pre-leave messages");
+        assert_eq!(
+            message.text.as_deref(),
+            Some("pre-leave"),
+            "Bob can read pre-leave messages"
+        );
     }
 
     let mut alice_rx = alice_agent.subscribe();
     bob_agent.leave_chat(group_id).await.unwrap();
     let _ = wait_high(&mut alice_rx, |e| {
         matches!(e, HighEvent::GroupMembershipChanged { .. })
-    }).await;
+    })
+    .await;
 
     let alice_chat2 = alice_agent.chat(group_id).await.unwrap();
     let sent2 = alice_chat2.send("post-leave").await.unwrap();
-    let s2 = sent2.encrypted_payload.as_ref().unwrap().megolm_session_id.clone();
+    let s2 = sent2
+        .encrypted_payload
+        .as_ref()
+        .unwrap()
+        .megolm_session_id
+        .clone();
 
     assert!(
-        bob_low.store().megolm_inbound(group_id, &s2).await.is_none(),
+        bob_low
+            .store()
+            .megolm_inbound(group_id, &s2)
+            .await
+            .is_none(),
         "Bob must not have the key for the post-leave message"
     );
 

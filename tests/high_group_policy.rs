@@ -64,14 +64,21 @@ async fn high_backup_export_import_roundtrip() {
     let alice_chat = alice_agent.chat(group_id).await.expect("alice chat");
     let mut bob_rx = bob_agent.subscribe();
     let sent = alice_chat.send("backup payload").await.expect("send");
-    let _ = wait_high(&mut bob_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id)
-    })
+    let _ = wait_high(
+        &mut bob_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == sent.id),
+    )
     .await;
 
-    let (recovery, export) = alice_sec.backup_export_default().await.expect("export_default");
+    let (recovery, export) = alice_sec
+        .backup_export_default()
+        .await
+        .expect("export_default");
     assert!(export.version >= 1);
-    assert!(export.items_uploaded >= 1, "at least one Megolm session expected");
+    assert!(
+        export.items_uploaded >= 1,
+        "at least one Megolm session expected"
+    );
 
     let mut alice2_client = LockNetClient::new(common::test_config());
     let alice2_session = alice2_client
@@ -87,8 +94,14 @@ async fn high_backup_export_import_roundtrip() {
     let alice2_sec = alice2_agent.security();
     let alice2_chat = alice2_agent.chat(group_id).await.expect("alice2 chat");
 
-    let unread = alice2_chat.messages(None, 20).await.expect("alice2 messages");
-    let msg_unread = unread.iter().find(|m| m.id == sent.id).expect("msg in history");
+    let unread = alice2_chat
+        .messages(None, 20)
+        .await
+        .expect("alice2 messages");
+    let msg_unread = unread
+        .iter()
+        .find(|m| m.id == sent.id)
+        .expect("msg in history");
     assert_eq!(msg_unread.text, None, "without the key, text is None");
 
     let import = alice2_sec
@@ -98,7 +111,10 @@ async fn high_backup_export_import_roundtrip() {
     assert_eq!(import.version, export.version);
     assert!(import.sessions_imported >= 1);
 
-    let read = alice2_chat.messages(None, 20).await.expect("alice2 messages #2");
+    let read = alice2_chat
+        .messages(None, 20)
+        .await
+        .expect("alice2 messages #2");
     let msg_read = read.iter().find(|m| m.id == sent.id).expect("msg #2");
     assert_eq!(msg_read.text.as_deref(), Some("backup payload"));
 
@@ -136,7 +152,7 @@ async fn high_backup_wrong_recovery_key_fails() {
     let alice2_agent = alice2_client.get_agent().expect("alice2 agent");
     let alice2_sec = alice2_agent.security();
 
-    let wrong = RecoveryKey::generate();
+    let wrong = RecoveryKey::generate().expect("RNG");
     let err = alice2_sec
         .backup_import(export.version, &wrong)
         .await

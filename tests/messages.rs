@@ -67,7 +67,10 @@ async fn get_messages_has_more() {
     for i in 0..3 {
         alice_low
             .messages()
-            .send(group_id, fake_enc(alice.session.session_id, &format!("m{i}")))
+            .send(
+                group_id,
+                fake_enc(alice.session.session_id, &format!("m{i}")),
+            )
             .await
             .expect("send");
     }
@@ -156,8 +159,16 @@ async fn edit_by_author_succeeds() {
         _ => unreachable!(),
     }
 
-    let page = bob_low.messages().get(group_id, None, 20).await.expect("get");
-    let found = page.messages.iter().find(|m| m.message_id == ack.message_id).unwrap();
+    let page = bob_low
+        .messages()
+        .get(group_id, None, 20)
+        .await
+        .expect("get");
+    let found = page
+        .messages
+        .iter()
+        .find(|m| m.message_id == ack.message_id)
+        .unwrap();
     assert!(found.edited_at.is_some(), "edited_at must be set");
     assert_eq!(
         common::decode_fake(&found.encrypted.as_ref().unwrap().ciphertext),
@@ -218,7 +229,11 @@ async fn delete_marks_message_deleted() {
 
     let mut bob_rx = bob_low.subscribe();
 
-    alice_low.messages().delete(ack.message_id).await.expect("delete");
+    alice_low
+        .messages()
+        .delete(ack.message_id)
+        .await
+        .expect("delete");
 
     let evt = common::wait_event(&mut bob_rx, |e| matches!(e, Event::MessageDelete(_))).await;
     match evt {
@@ -229,10 +244,21 @@ async fn delete_marks_message_deleted() {
         _ => unreachable!(),
     }
 
-    let page = bob_low.messages().get(group_id, None, 20).await.expect("get");
-    let found = page.messages.iter().find(|m| m.message_id == ack.message_id).unwrap();
+    let page = bob_low
+        .messages()
+        .get(group_id, None, 20)
+        .await
+        .expect("get");
+    let found = page
+        .messages
+        .iter()
+        .find(|m| m.message_id == ack.message_id)
+        .unwrap();
     assert!(found.deleted, "deleted flag must be true");
-    assert!(found.encrypted.is_none(), "encrypted must be cleared on delete");
+    assert!(
+        found.encrypted.is_none(),
+        "encrypted must be cleared on delete"
+    );
 
     let mut a = alice;
     let mut b = bob;
@@ -285,8 +311,16 @@ async fn reactions_full_flow() {
 
     tokio::time::sleep(std::time::Duration::from_millis(150)).await;
 
-    let page = alice_low.messages().get(group_id, None, 20).await.expect("get");
-    let found = page.messages.iter().find(|m| m.message_id == ack.message_id).unwrap();
+    let page = alice_low
+        .messages()
+        .get(group_id, None, 20)
+        .await
+        .expect("get");
+    let found = page
+        .messages
+        .iter()
+        .find(|m| m.message_id == ack.message_id)
+        .unwrap();
     assert_eq!(found.reactions.len(), 1);
     assert_eq!(found.reactions[0].emoji, "👍");
     assert_eq!(found.reactions[0].count, 1);
@@ -333,11 +367,7 @@ async fn session_mismatch_fails() {
     let alice_low = alice.low();
 
     let enc = fake_enc(999_999_999, "bad session");
-    let err = alice_low
-        .messages()
-        .send(group_id, enc)
-        .await
-        .unwrap_err();
+    let err = alice_low.messages().send(group_id, enc).await.unwrap_err();
     common::assert_server_code(err, "session_mismatch");
 
     let mut a = alice;
@@ -383,7 +413,11 @@ async fn not_a_member_cannot_send() {
     let charlie_low = charlie.low();
 
     let enc = fake_enc(charlie.session.session_id, "intruder");
-    let err = charlie_low.messages().send(group_id, enc).await.unwrap_err();
+    let err = charlie_low
+        .messages()
+        .send(group_id, enc)
+        .await
+        .unwrap_err();
     common::assert_server_code(err, "not_a_member");
 
     let mut a = alice;

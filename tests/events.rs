@@ -151,11 +151,7 @@ async fn events_sync_until_empty_helper() {
         .expect("sync_until_empty");
     assert!(total >= 2, "expected >=2 events total, got {}", total);
 
-    let total2 = bob2_low
-        .events()
-        .sync_until_empty(10)
-        .await
-        .expect("sync2");
+    let total2 = bob2_low.events().sync_until_empty(10).await.expect("sync2");
     assert_eq!(total2, 0, "a second sync_until_empty must return 0");
 
     bob2.disconnect().await.ok();

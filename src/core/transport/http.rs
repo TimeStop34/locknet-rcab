@@ -48,15 +48,27 @@ pub struct RefreshResponse {
 /// - [`LockNetError::InvalidCredentials`] on HTTP 401.
 /// - [`LockNetError::InvalidResponse`] on any other non-200 status.
 /// - [`LockNetError::Http`] on transport failure.
-pub async fn login(config: &LockNetConfig, http: &reqwest::Client, username: &str, password: &str) -> Result<AuthResponse> {
+pub async fn login(
+    config: &LockNetConfig,
+    http: &reqwest::Client,
+    username: &str,
+    password: &str,
+) -> Result<AuthResponse> {
     let url = config.endpoint("/api/v1/auth/login");
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .json(&json!({ "username": username, "password": password }))
-        .send().await?;
+        .send()
+        .await?;
     match resp.status().as_u16() {
         200 => Ok(resp.json::<AuthResponse>().await?),
         401 => Err(LockNetError::InvalidCredentials),
-        s => { let body = resp.text().await.unwrap_or_default(); Err(LockNetError::InvalidResponse(format!("login: HTTP {s}: {body}"))) }
+        s => {
+            let body = resp.text().await.unwrap_or_default();
+            Err(LockNetError::InvalidResponse(format!(
+                "login: HTTP {s}: {body}"
+            )))
+        }
     }
 }
 
@@ -67,17 +79,33 @@ pub async fn login(config: &LockNetConfig, http: &reqwest::Client, username: &st
 /// - [`LockNetError::Server`] with code `username_taken` on HTTP 409.
 /// - [`LockNetError::InvalidResponse`] on any other non-201 status.
 /// - [`LockNetError::Http`] on transport failure.
-pub async fn register(config: &LockNetConfig, http: &reqwest::Client, username: &str, password: &str, display_name: Option<&str>) -> Result<AuthResponse> {
+pub async fn register(
+    config: &LockNetConfig,
+    http: &reqwest::Client,
+    username: &str,
+    password: &str,
+    display_name: Option<&str>,
+) -> Result<AuthResponse> {
     let url = config.endpoint("/api/v1/auth/register");
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .json(&json!({
             "username": username, "password": password, "display_name": display_name,
         }))
-        .send().await?;
+        .send()
+        .await?;
     match resp.status().as_u16() {
         201 => Ok(resp.json::<AuthResponse>().await?),
-        409 => Err(LockNetError::Server { code: "username_taken".into(), message: "Username already taken".into() }),
-        s => { let body = resp.text().await.unwrap_or_default(); Err(LockNetError::InvalidResponse(format!("register: HTTP {s}: {body}"))) }
+        409 => Err(LockNetError::Server {
+            code: "username_taken".into(),
+            message: "Username already taken".into(),
+        }),
+        s => {
+            let body = resp.text().await.unwrap_or_default();
+            Err(LockNetError::InvalidResponse(format!(
+                "register: HTTP {s}: {body}"
+            )))
+        }
     }
 }
 
@@ -88,14 +116,25 @@ pub async fn register(config: &LockNetConfig, http: &reqwest::Client, username: 
 /// - [`LockNetError::SessionExpired`] on HTTP 401 (refresh token rejected).
 /// - [`LockNetError::InvalidResponse`] on any other non-200 status.
 /// - [`LockNetError::Http`] on transport failure.
-pub async fn refresh(config: &LockNetConfig, http: &reqwest::Client, refresh_jwt: &str) -> Result<RefreshResponse> {
+pub async fn refresh(
+    config: &LockNetConfig,
+    http: &reqwest::Client,
+    refresh_jwt: &str,
+) -> Result<RefreshResponse> {
     let url = config.endpoint("/api/v1/auth/refresh");
-    let resp = http.post(&url)
+    let resp = http
+        .post(&url)
         .json(&json!({ "refresh_token": refresh_jwt }))
-        .send().await?;
+        .send()
+        .await?;
     match resp.status().as_u16() {
         200 => Ok(resp.json::<RefreshResponse>().await?),
         401 => Err(LockNetError::SessionExpired),
-        s => { let body = resp.text().await.unwrap_or_default(); Err(LockNetError::InvalidResponse(format!("refresh: HTTP {s}: {body}"))) }
+        s => {
+            let body = resp.text().await.unwrap_or_default();
+            Err(LockNetError::InvalidResponse(format!(
+                "refresh: HTTP {s}: {body}"
+            )))
+        }
     }
 }

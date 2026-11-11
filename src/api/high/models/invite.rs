@@ -1,9 +1,9 @@
 //! Group invitations.
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
 use super::group::Group;
 use super::user::User;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// An invitation to join a group.
 ///

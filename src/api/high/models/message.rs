@@ -1,10 +1,10 @@
 //! Messages as seen by the high-level layer.
 
-use chrono::{DateTime, Utc};
-use serde::{Deserialize, Serialize};
-use crate::api::low::models::Encrypted;
 use super::reaction::Reaction;
 use super::user::User;
+use crate::api::low::models::Encrypted;
+use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
 
 /// A message with its decrypted text (if available) and resolved author.
 ///

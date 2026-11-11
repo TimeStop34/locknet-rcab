@@ -118,7 +118,10 @@ async fn claim_one_time_key_returns_distinct_keys() {
         .claim_one_time_key(alice_uid, alice_sid, None)
         .await
         .expect("claim #2");
-    assert_ne!(otk1.key_id, otk2.key_id, "each claim consumes a distinct OTK");
+    assert_ne!(
+        otk1.key_id, otk2.key_id,
+        "each claim consumes a distinct OTK"
+    );
     assert_ne!(otk1.key, otk2.key);
 
     let mut a = alice;
@@ -183,7 +186,10 @@ async fn claim_one_time_key_exhausts_after_50() {
         {
             Ok(_) => {
                 claimed += 1;
-                assert!(claimed <= 100, "sanity: too many OTKs claimed, something is off");
+                assert!(
+                    claimed <= 100,
+                    "sanity: too many OTKs claimed, something is off"
+                );
             }
             Err(e) => {
                 common::assert_server_code(e, "no_one_time_keys");

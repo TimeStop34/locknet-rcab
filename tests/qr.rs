@@ -75,9 +75,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -111,12 +120,7 @@ async fn setup_full(user: &common::TestUser) -> CrossSigningKeysPrivate {
     keys
 }
 
-async fn setup_olm(
-    a_low: &LockNetLowAgent,
-    b_low: &LockNetLowAgent,
-    b_uid: i64,
-    b_sid: i64,
-) {
+async fn setup_olm(a_low: &LockNetLowAgent, b_low: &LockNetLowAgent, b_uid: i64, b_sid: i64) {
     let mut rx = b_low.subscribe();
     a_low
         .olm()
@@ -125,8 +129,15 @@ async fn setup_olm(
         .await
         .expect("olm forward setup");
     let evt = common::wait_event(&mut rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    b_low.olm().decrypt(p).wait().await.expect("forward setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    b_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("forward setup decrypt");
 
     let mut rx2 = a_low.subscribe();
     b_low
@@ -136,8 +147,15 @@ async fn setup_olm(
         .await
         .expect("olm reverse setup");
     let evt = common::wait_event(&mut rx2, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    a_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    a_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("reverse setup decrypt");
 }
 
 async fn peer_msk(observer: &LockNetLowAgent, peer_uid: i64) -> String {
@@ -223,7 +241,10 @@ async fn qr_mode0_user_to_user_full_flow() {
         .await
         .expect("alice next timeout")
         .expect("alice next");
-    assert!(matches!(alice_step, QrStep::Confirmed), "alice: {alice_step:?}");
+    assert!(
+        matches!(alice_step, QrStep::Confirmed),
+        "alice: {alice_step:?}"
+    );
 
     let bob_step = tokio::time::timeout(Duration::from_secs(10), bob_flow.next())
         .await
@@ -235,21 +256,21 @@ async fn qr_mode0_user_to_user_full_flow() {
     let bob_mk = bob_flow.mac_key().copied().expect("bob mac_key");
     assert_eq!(alice_mk, bob_mk, "both sides must derive the same MAC key");
 
-    let (alice_res, bob_res) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                alice_flow.exchange_mac(b_msk.clone()),
-                bob_flow.exchange_mac(a_msk.clone()),
-            )
-        },
-    )
+    let (alice_res, bob_res) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            alice_flow.exchange_mac(b_msk.clone()),
+            bob_flow.exchange_mac(a_msk.clone()),
+        )
+    })
     .await
     .expect("exchange_mac timeout");
 
     let alice_final = alice_res.expect("alice exchange_mac");
     let bob_final = bob_res.expect("bob exchange_mac");
-    assert!(matches!(alice_final, QrStep::Verified), "alice: {alice_final:?}");
+    assert!(
+        matches!(alice_final, QrStep::Verified),
+        "alice: {alice_final:?}"
+    );
     assert!(matches!(bob_final, QrStep::Verified), "bob: {bob_final:?}");
 
     let mut a = alice;
@@ -323,10 +344,9 @@ async fn qr_mode1_self_device_full_flow() {
         .await
         .expect("alice2 qr_scan");
 
-    let (d_step, s_step) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async { tokio::join!(disp_flow.next(), scan_flow.next()) },
-    )
+    let (d_step, s_step) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(disp_flow.next(), scan_flow.next())
+    })
     .await
     .expect("next join timeout");
     let d_step = d_step.expect("disp next");
@@ -334,15 +354,12 @@ async fn qr_mode1_self_device_full_flow() {
     assert!(matches!(d_step, QrStep::Confirmed), "disp: {d_step:?}");
     assert!(matches!(s_step, QrStep::Confirmed), "scan: {s_step:?}");
 
-    let (f1, f2) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                disp_flow.exchange_mac(alice2_ed.clone()),
-                scan_flow.exchange_mac(alice1_ed.clone()),
-            )
-        },
-    )
+    let (f1, f2) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            disp_flow.exchange_mac(alice2_ed.clone()),
+            scan_flow.exchange_mac(alice1_ed.clone()),
+        )
+    })
     .await
     .expect("exchange_mac timeout");
 
@@ -407,10 +424,9 @@ async fn qr_mode2_self_device_full_flow() {
         .await
         .expect("qr_scan");
 
-    let (d_step, s_step) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async { tokio::join!(disp_flow.next(), scan_flow.next()) },
-    )
+    let (d_step, s_step) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(disp_flow.next(), scan_flow.next())
+    })
     .await
     .expect("next join timeout");
     let d_step = d_step.expect("disp next");
@@ -418,15 +434,12 @@ async fn qr_mode2_self_device_full_flow() {
     assert!(matches!(d_step, QrStep::Confirmed));
     assert!(matches!(s_step, QrStep::Confirmed));
 
-    let (f1, f2) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                disp_flow.exchange_mac(b_ed.clone()),
-                scan_flow.exchange_mac(a_ed.clone()),
-            )
-        },
-    )
+    let (f1, f2) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            disp_flow.exchange_mac(b_ed.clone()),
+            scan_flow.exchange_mac(a_ed.clone()),
+        )
+    })
     .await
     .expect("exchange_mac timeout");
 
@@ -568,24 +581,20 @@ async fn qr_mac_mismatch_cancels() {
         .await
         .expect("qr_scan");
 
-    let _ = tokio::time::timeout(
-        Duration::from_secs(10),
-        async { tokio::join!(alice_flow.next(), bob_flow.next()) },
-    )
+    let _ = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(alice_flow.next(), bob_flow.next())
+    })
     .await
     .expect("next join timeout");
 
     // Alice passes her OWN msk as the expected peer key.
     let real_a_msk = peer_msk(&bob_low, alice_uid).await;
-    let (alice_res, bob_res) = tokio::time::timeout(
-        Duration::from_secs(10),
-        async {
-            tokio::join!(
-                alice_flow.exchange_mac(a_msk.clone()),
-                bob_flow.exchange_mac(real_a_msk),
-            )
-        },
-    )
+    let (alice_res, bob_res) = tokio::time::timeout(Duration::from_secs(10), async {
+        tokio::join!(
+            alice_flow.exchange_mac(a_msk.clone()),
+            bob_flow.exchange_mac(real_a_msk),
+        )
+    })
     .await
     .expect("exchange_mac timeout");
 
@@ -643,13 +652,7 @@ async fn qr_invalid_raw_fails() {
 
     let r3 = alice_low
         .verification()
-        .qr_scan(
-            "LockNetProtocol;v1.0;5;txid;AAAA;BBBB",
-            1,
-            1,
-            a_msk,
-            a_ed,
-        )
+        .qr_scan("LockNetProtocol;v1.0;5;txid;AAAA;BBBB", 1, 1, a_msk, a_ed)
         .await;
     match r3 {
         Ok(_) => panic!("qr_scan with invalid mode must not return Ok"),

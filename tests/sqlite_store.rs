@@ -25,9 +25,7 @@ use std::sync::Arc;
 
 use locknet_rcab::core::crypto::{
     megolm::{create_outbound as create_outbound_group, import_inbound as import_inbound_group},
-    olm::{
-        create_outbound as create_outbound_olm, decrypt_olm, encrypt_olm, curve_from_b64,
-    },
+    olm::{create_outbound as create_outbound_olm, curve_from_b64, decrypt_olm, encrypt_olm},
     signature::CrossSigningKeysPrivate,
     Account, CryptoStore, SqliteStore,
 };
@@ -47,7 +45,9 @@ fn new_cs_keys() -> Arc<CrossSigningKeysPrivate> {
     Arc::new(CrossSigningKeysPrivate::generate())
 }
 
-async fn group_session_id(session: &Arc<tokio::sync::Mutex<vodozemac::megolm::GroupSession>>) -> String {
+async fn group_session_id(
+    session: &Arc<tokio::sync::Mutex<vodozemac::megolm::GroupSession>>,
+) -> String {
     let s = session.lock().await;
     s.session_id()
 }
@@ -343,7 +343,11 @@ async fn megolm_inbound_roundtrip() {
     {
         let store = SqliteStore::open(&path, "pass").expect("open");
         store
-            .megolm_inbound_put(888, sid.clone(), Arc::new(tokio::sync::Mutex::new(bob_inbound)))
+            .megolm_inbound_put(
+                888,
+                sid.clone(),
+                Arc::new(tokio::sync::Mutex::new(bob_inbound)),
+            )
             .await;
     }
 
@@ -394,7 +398,10 @@ async fn group_data_state_roundtrip() {
     assert_eq!(loaded.key, state.key);
     assert_eq!(loaded.blob, state.blob);
     assert_eq!(loaded.data.version, 3);
-    assert_eq!(loaded.data.history_visibility, HistoryVisibility::AllVerifiedUsers);
+    assert_eq!(
+        loaded.data.history_visibility,
+        HistoryVisibility::AllVerifiedUsers
+    );
     assert_eq!(
         loaded.data.megolm_rotation_visibility,
         MegolmRotationVisibility::OnlyVerifiedSessions

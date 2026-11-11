@@ -81,7 +81,7 @@ impl LockNetKeySharingHelper {
         to_session: i64,
         chat_ids: Vec<i64>,
     ) -> Result<String> {
-        let txid = generate_txid();
+        let txid = generate_txid()?;
 
         let have: Vec<String> = {
             let store = olm_store_via_megolm(&self.megolm);
@@ -133,13 +133,17 @@ impl LockNetKeySharingHelper {
                     if let Some(pt) = self.olm.decrypt(payload).wait().await? {
                         if let Ok(val) = serde_json::from_str::<Value>(&pt) {
                             if val.get("type").and_then(|v| v.as_str()) == Some(LN_KEY_REQUEST) {
-                                let content = val
-                                    .get("content")
-                                    .ok_or_else(|| LockNetError::InvalidResponse("key_request: no content".into()))?;
+                                let content = val.get("content").ok_or_else(|| {
+                                    LockNetError::InvalidResponse("key_request: no content".into())
+                                })?;
                                 let transaction_id = content
                                     .get("transaction_id")
                                     .and_then(|v| v.as_str())
-                                    .ok_or_else(|| LockNetError::InvalidResponse("key_request: no transaction_id".into()))?
+                                    .ok_or_else(|| {
+                                        LockNetError::InvalidResponse(
+                                            "key_request: no transaction_id".into(),
+                                        )
+                                    })?
                                     .to_string();
                                 let chat_ids = parse_chat_ids(content)?;
                                 let have = parse_have(content)?;
@@ -177,11 +181,13 @@ impl LockNetKeySharingHelper {
             megolm_session_id,
             session_key,
             Some(transaction_id),
-        ).await;
+        )
+        .await;
         let pt = json!({
             "type": LN_GROUP_KEY,
             "content": content,
-        }).to_string();
+        })
+        .to_string();
         self.olm.send(to_user, to_session, pt).wait().await
     }
 
@@ -200,7 +206,10 @@ impl LockNetKeySharingHelper {
                 "count": count,
             }
         });
-        self.olm.send(to_user, to_session, content.to_string()).wait().await
+        self.olm
+            .send(to_user, to_session, content.to_string())
+            .wait()
+            .await
     }
 
     /// Send `ln.encryption.key_denied`.
@@ -218,7 +227,10 @@ impl LockNetKeySharingHelper {
                 "reason": reason,
             }
         });
-        self.olm.send(to_user, to_session, content.to_string()).wait().await
+        self.olm
+            .send(to_user, to_session, content.to_string())
+            .wait()
+            .await
     }
 }
 
@@ -285,7 +297,7 @@ impl KeyRequestFlow {
         to_session: i64,
         chat_ids: Vec<i64>,
     ) -> Result<Self> {
-        let txid = generate_txid();
+        let txid = generate_txid()?;
 
         let have: Vec<String> = {
             let store = olm_store_via_megolm(&megolm);
@@ -307,7 +319,9 @@ impl KeyRequestFlow {
             }
         });
 
-        olm.send(to_user, to_session, content.to_string()).wait().await?;
+        olm.send(to_user, to_session, content.to_string())
+            .wait()
+            .await?;
 
         let _ = our_session_id;
 
@@ -325,13 +339,19 @@ impl KeyRequestFlow {
     }
 
     /// Transaction ID of this request.
-    pub fn transaction_id(&self) -> &str { &self.txid }
+    pub fn transaction_id(&self) -> &str {
+        &self.txid
+    }
 
     /// Chats requested in this flow.
-    pub fn chat_ids(&self) -> &[i64] { &self.chat_ids }
+    pub fn chat_ids(&self) -> &[i64] {
+        &self.chat_ids
+    }
 
     /// Number of keys imported so far.
-    pub fn imported_count(&self) -> u32 { self.imported_count }
+    pub fn imported_count(&self) -> u32 {
+        self.imported_count
+    }
 
     /// Advance the flow by one step.
     ///
@@ -341,7 +361,11 @@ impl KeyRequestFlow {
     /// reached; subsequent calls return it again.
     pub async fn next(&mut self) -> Result<KeyRequestStep> {
         match self.state.clone() {
-            InternalState::Done { total } => return Ok(KeyRequestStep::Done { total_imported: total }),
+            InternalState::Done { total } => {
+                return Ok(KeyRequestStep::Done {
+                    total_imported: total,
+                })
+            }
             InternalState::Denied(reason) => return Ok(KeyRequestStep::Denied { reason }),
             InternalState::Cancelled(reason) => return Ok(KeyRequestStep::Cancelled(reason)),
             InternalState::Waiting => {}
@@ -378,9 +402,9 @@ impl KeyRequestFlow {
 
         match msg_type {
             LN_GROUP_KEY => {
-                let content = val.get("content").ok_or_else(|| {
-                    LockNetError::InvalidResponse("group_key: no content".into())
-                })?;
+                let content = val
+                    .get("content")
+                    .ok_or_else(|| LockNetError::InvalidResponse("group_key: no content".into()))?;
                 let chat_id = content
                     .get("chat_id")
                     .and_then(|v| v.as_i64())
@@ -388,12 +412,16 @@ impl KeyRequestFlow {
                 let megolm_session_id = content
                     .get("megolm_session_id")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| LockNetError::InvalidResponse("group_key: no megolm_session_id".into()))?
+                    .ok_or_else(|| {
+                        LockNetError::InvalidResponse("group_key: no megolm_session_id".into())
+                    })?
                     .to_string();
                 let session_key = content
                     .get("session_key")
                     .and_then(|v| v.as_str())
-                    .ok_or_else(|| LockNetError::InvalidResponse("group_key: no session_key".into()))?
+                    .ok_or_else(|| {
+                        LockNetError::InvalidResponse("group_key: no session_key".into())
+                    })?
                     .to_string();
 
                 self.megolm
@@ -409,12 +437,17 @@ impl KeyRequestFlow {
 
                 self.imported_count += 1;
 
-                Ok(Some(KeyRequestStep::GroupKeyImported { chat_id, megolm_session_id }))
+                Ok(Some(KeyRequestStep::GroupKeyImported {
+                    chat_id,
+                    megolm_session_id,
+                }))
             }
             LN_KEY_REQUEST_DONE => {
                 let total = self.imported_count;
                 self.state = InternalState::Done { total };
-                Ok(Some(KeyRequestStep::Done { total_imported: total }))
+                Ok(Some(KeyRequestStep::Done {
+                    total_imported: total,
+                }))
             }
             LN_KEY_DENIED => {
                 let reason = val
@@ -449,9 +482,9 @@ fn parse_chat_ids(content: &Value) -> Result<Vec<i64>> {
         .ok_or_else(|| LockNetError::InvalidResponse("key_request: no chat_ids".into()))?;
     let mut out = Vec::with_capacity(arr.len());
     for v in arr {
-        let id = v
-            .as_i64()
-            .ok_or_else(|| LockNetError::InvalidResponse("key_request: chat_ids must be i64".into()))?;
+        let id = v.as_i64().ok_or_else(|| {
+            LockNetError::InvalidResponse("key_request: chat_ids must be i64".into())
+        })?;
         out.push(id);
     }
     Ok(out)
@@ -464,9 +497,9 @@ fn parse_have(content: &Value) -> Result<Vec<String>> {
         Some(arr) => {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr {
-                let s = v
-                    .as_str()
-                    .ok_or_else(|| LockNetError::InvalidResponse("key_request: have items must be strings".into()))?;
+                let s = v.as_str().ok_or_else(|| {
+                    LockNetError::InvalidResponse("key_request: have items must be strings".into())
+                })?;
                 out.push(s.to_string());
             }
             Ok(out)
@@ -478,8 +511,6 @@ fn olm_store_via_megolm(megolm: &LockNetMegolmHelper) -> Arc<dyn crate::core::cr
     megolm.store.clone()
 }
 
-fn generate_txid() -> String {
-    let mut bytes = [0u8; 8];
-    getrandom::getrandom(&mut bytes).expect("getrandom");
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+fn generate_txid() -> Result<String> {
+    crate::core::crypto::random::random_txid()
 }

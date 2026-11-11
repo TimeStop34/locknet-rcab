@@ -68,9 +68,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -188,21 +197,28 @@ async fn new_device_recovers_history_from_sibling_device() {
     let mut bob1_rx = bob1_agent.subscribe();
 
     let m1 = alice_chat.send("history-1").await.expect("send1");
-    let _ = wait_high_event(&mut bob1_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == m1.id)
-    })
+    let _ = wait_high_event(
+        &mut bob1_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == m1.id),
+    )
     .await;
 
     let m2 = alice_chat.send("history-2").await.expect("send2");
-    let _ = wait_high_event(&mut bob1_rx, |e| {
-        matches!(e, HighEvent::NewMessage { message, .. } if message.id == m2.id)
-    })
+    let _ = wait_high_event(
+        &mut bob1_rx,
+        |e| matches!(e, HighEvent::NewMessage { message, .. } if message.id == m2.id),
+    )
     .await;
 
     let bob1_chat = bob1_agent.chat(group_id).await.expect("bob1 chat");
     let bob1_history = bob1_chat.messages(None, 20).await.expect("bob1 messages");
     assert_eq!(
-        bob1_history.iter().find(|m| m.id == m1.id).unwrap().text.as_deref(),
+        bob1_history
+            .iter()
+            .find(|m| m.id == m1.id)
+            .unwrap()
+            .text
+            .as_deref(),
         Some("history-1")
     );
 
@@ -227,8 +243,14 @@ async fn new_device_recovers_history_from_sibling_device() {
 
     let bob2_chat = bob2_agent.chat(group_id).await.expect("bob2 chat");
     let history_unread = bob2_chat.messages(None, 20).await.expect("bob2 messages");
-    let m1_unread = history_unread.iter().find(|m| m.id == m1.id).expect("m1 in history");
-    let m2_unread = history_unread.iter().find(|m| m.id == m2.id).expect("m2 in history");
+    let m1_unread = history_unread
+        .iter()
+        .find(|m| m.id == m1.id)
+        .expect("m1 in history");
+    let m2_unread = history_unread
+        .iter()
+        .find(|m| m.id == m2.id)
+        .expect("m2 in history");
     assert_eq!(m1_unread.text, None, "Bob2 has no key for m1");
     assert_eq!(m2_unread.text, None, "Bob2 has no key for m2");
 
@@ -244,7 +266,10 @@ async fn new_device_recovers_history_from_sibling_device() {
         "Bob2 must receive group_data as part of key_request"
     );
 
-    let history_read = bob2_chat.messages(None, 20).await.expect("bob2 messages #2");
+    let history_read = bob2_chat
+        .messages(None, 20)
+        .await
+        .expect("bob2 messages #2");
     let m1_read = history_read.iter().find(|m| m.id == m1.id).expect("m1 #2");
     let m2_read = history_read.iter().find(|m| m.id == m2.id).expect("m2 #2");
     assert_eq!(m1_read.text.as_deref(), Some("history-1"));
@@ -310,12 +335,29 @@ async fn untrusted_member_is_denied() {
         .expect("create");
 
     let bob_invites = bob_agent.invites().await.expect("bob invites");
-    let bob_inv = bob_invites.iter().find(|i| i.group.id == group.id()).unwrap();
-    bob_agent.accept_invite(bob_inv.id).await.expect("bob accept");
+    let bob_inv = bob_invites
+        .iter()
+        .find(|i| i.group.id == group.id())
+        .unwrap();
+    bob_agent
+        .accept_invite(bob_inv.id)
+        .await
+        .expect("bob accept");
 
-    let charlie_invites = charlie_low.groups().invites().await.expect("charlie invites");
-    let charlie_inv = charlie_invites.iter().find(|i| i.group_id == group.id()).unwrap();
-    charlie_low.groups().accept_invite(charlie_inv.id).await.expect("charlie accept");
+    let charlie_invites = charlie_low
+        .groups()
+        .invites()
+        .await
+        .expect("charlie invites");
+    let charlie_inv = charlie_invites
+        .iter()
+        .find(|i| i.group_id == group.id())
+        .unwrap();
+    charlie_low
+        .groups()
+        .accept_invite(charlie_inv.id)
+        .await
+        .expect("charlie accept");
 
     let alice_chat = alice_agent.chat(group.id()).await.expect("alice chat");
     let _m = alice_chat.send("private").await.expect("send");

@@ -1,15 +1,17 @@
 //! Megolm (group) sessions, rotation, and `group_key` payload handling.
 
-use std::sync::Arc;
-use serde_json::json;
-use tokio::sync::Mutex;
 use crate::api::low::command::CmdSender;
+use crate::api::low::helpers::olm::LockNetOlmHelper;
 use crate::api::low::models::Encrypted;
-use crate::core::crypto::megolm::{create_outbound, decrypt_inbound, encrypt, import_inbound, session_id, MEGOLM_ALGORITHM};
+use crate::core::crypto::megolm::{
+    create_outbound, decrypt_inbound, encrypt, import_inbound, session_id, MEGOLM_ALGORITHM,
+};
 use crate::core::crypto::CryptoStore;
 use crate::core::errors::{LockNetError, Result};
 use crate::core::policies::MegolmOutboundMeta;
-use crate::api::low::helpers::olm::LockNetOlmHelper;
+use serde_json::json;
+use std::sync::Arc;
+use tokio::sync::Mutex;
 
 /// Snapshot of the current outbound Megolm session for a chat.
 pub struct MegolmSessionInfo {
@@ -59,21 +61,21 @@ impl LockNetMegolmHelper {
         let (session, key) = create_outbound();
         let sid = session_id(&session);
 
-        let (new_version, history_vis, megolm_vis) = match self.store.group_data_state(chat_id).await {
-            Some(prev) => (
-                prev.data.version.saturating_add(1),
-                prev.data.history_visibility,
-                prev.data.megolm_rotation_visibility,
-            ),
-            None => (
-                1,
-                self.default_history_visibility,
-                self.default_megolm_rotation_visibility,
-            ),
-        };
+        let (new_version, history_vis, megolm_vis) =
+            match self.store.group_data_state(chat_id).await {
+                Some(prev) => (
+                    prev.data.version.saturating_add(1),
+                    prev.data.history_visibility,
+                    prev.data.megolm_rotation_visibility,
+                ),
+                None => (
+                    1,
+                    self.default_history_visibility,
+                    self.default_megolm_rotation_visibility,
+                ),
+            };
 
-        let mut gd_key = [0u8; 32];
-        getrandom::getrandom(&mut gd_key).expect("getrandom");
+        let gd_key = crate::core::crypto::random::random_bytes::<32>()?;
 
         let gd_data = GroupData {
             version: new_version,
@@ -83,27 +85,35 @@ impl LockNetMegolmHelper {
         };
         let gd_blob = encrypt_group_data(&gd_data, &gd_key)?;
 
-        self.store.group_data_state_put(
-            chat_id,
-            GroupDataState {
-                key: gd_key,
-                data: gd_data,
-                blob: gd_blob,
-            },
-        ).await;
+        self.store
+            .group_data_state_put(
+                chat_id,
+                GroupDataState {
+                    key: gd_key,
+                    data: gd_data,
+                    blob: gd_blob,
+                },
+            )
+            .await;
 
-        self.store.megolm_outbound_put(chat_id, Arc::new(Mutex::new(session)), key.clone()).await;
+        self.store
+            .megolm_outbound_put(chat_id, Arc::new(Mutex::new(session)), key.clone())
+            .await;
         let inbound = import_inbound(&key)?;
-        self.store.megolm_inbound_put(chat_id, sid.clone(), Arc::new(Mutex::new(inbound))).await;
+        self.store
+            .megolm_inbound_put(chat_id, sid.clone(), Arc::new(Mutex::new(inbound)))
+            .await;
 
-        self.store.megolm_outbound_meta_put(
-            chat_id,
-            MegolmOutboundMeta {
-                session_id: sid.clone(),
-                created_at: chrono::Utc::now(),
-                messages_sent: 0,
-            },
-        ).await;
+        self.store
+            .megolm_outbound_meta_put(
+                chat_id,
+                MegolmOutboundMeta {
+                    session_id: sid.clone(),
+                    created_at: chrono::Utc::now(),
+                    messages_sent: 0,
+                },
+            )
+            .await;
 
         Ok(MegolmSessionInfo {
             chat_id,
@@ -123,12 +133,15 @@ impl LockNetMegolmHelper {
         let meta = self.store.megolm_outbound_meta(chat_id).await;
 
         if let (Some(session), Some(key), Some(meta)) = (existing, existing_key, meta) {
-            let sid = { let s = session.lock().await; session_id(&s) };
+            let sid = {
+                let s = session.lock().await;
+                session_id(&s)
+            };
 
             let now = chrono::Utc::now();
             let age = now.signed_duration_since(meta.created_at);
-            let ttl_expired = self.rotation_ttl_secs > 0
-                && age.num_seconds() as u64 >= self.rotation_ttl_secs;
+            let ttl_expired =
+                self.rotation_ttl_secs > 0 && age.num_seconds() as u64 >= self.rotation_ttl_secs;
             let count_exceeded = self.rotation_message_count > 0
                 && meta.messages_sent >= self.rotation_message_count;
 
@@ -170,8 +183,10 @@ impl LockNetMegolmHelper {
     /// crosses the threshold, the next call to [`Self::ensure_session`] will
     /// rotate.
     pub async fn encrypt(&self, chat_id: i64, plaintext: impl Into<String>) -> Result<Encrypted> {
-        let session = self.store.megolm_outbound(chat_id).await
-            .ok_or_else(|| LockNetError::InvalidResponse("no megolm session for chat".into()))?;
+        let session =
+            self.store.megolm_outbound(chat_id).await.ok_or_else(|| {
+                LockNetError::InvalidResponse("no megolm session for chat".into())
+            })?;
         let (sid, ct) = {
             let mut s = session.lock().await;
             let sid = session_id(&s);
@@ -199,13 +214,22 @@ impl LockNetMegolmHelper {
     /// `encrypted.megolm_session_id`, or if `encrypted.algorithm` is not
     /// [`MEGOLM_ALGORITHM`].
     pub async fn decrypt(&self, chat_id: i64, encrypted: &Encrypted) -> Result<Option<String>> {
-        if encrypted.algorithm != MEGOLM_ALGORITHM { return Ok(None); }
-        let session = match self.store.megolm_inbound(chat_id, &encrypted.megolm_session_id).await {
+        if encrypted.algorithm != MEGOLM_ALGORITHM {
+            return Ok(None);
+        }
+        let session = match self
+            .store
+            .megolm_inbound(chat_id, &encrypted.megolm_session_id)
+            .await
+        {
             Some(s) => s,
             None => return Ok(None),
         };
         let mut s = session.lock().await;
-        match decrypt_inbound(&mut s, &encrypted.ciphertext) { Ok(pt) => Ok(Some(pt)), Err(_) => Ok(None) }
+        match decrypt_inbound(&mut s, &encrypted.ciphertext) {
+            Ok(pt) => Ok(Some(pt)),
+            Err(_) => Ok(None),
+        }
     }
 
     /// Import an inbound session from a base64-encoded key.
@@ -213,9 +237,16 @@ impl LockNetMegolmHelper {
     /// # Errors
     ///
     /// Returns [`LockNetError::InvalidResponse`] if the key is malformed.
-    pub async fn import(&self, chat_id: i64, megolm_session_id: String, session_key: String) -> Result<()> {
+    pub async fn import(
+        &self,
+        chat_id: i64,
+        megolm_session_id: String,
+        session_key: String,
+    ) -> Result<()> {
         let session = import_inbound(&session_key)?;
-        self.store.megolm_inbound_put(chat_id, megolm_session_id, Arc::new(Mutex::new(session))).await;
+        self.store
+            .megolm_inbound_put(chat_id, megolm_session_id, Arc::new(Mutex::new(session)))
+            .await;
         Ok(())
     }
 
@@ -248,17 +279,14 @@ impl LockNetMegolmHelper {
         megolm_session_id: String,
         session_key: String,
     ) -> Result<()> {
-        let content = build_group_key_content(
-            &self.store,
-            chat_id,
-            megolm_session_id,
-            session_key,
-            None,
-        ).await;
+        let content =
+            build_group_key_content(&self.store, chat_id, megolm_session_id, session_key, None)
+                .await;
         let pt = json!({
             "type": "ln.encryption.group_key",
             "content": content,
-        }).to_string();
+        })
+        .to_string();
         self.olm.send(to_user, to_session, pt).wait().await
     }
 
@@ -393,14 +421,16 @@ pub(crate) async fn apply_group_data_to_store(
         }
     }
 
-    store.group_data_state_put(
-        chat_id,
-        crate::core::policies::GroupDataState {
-            key,
-            data,
-            blob: blob.to_string(),
-        },
-    ).await;
+    store
+        .group_data_state_put(
+            chat_id,
+            crate::core::policies::GroupDataState {
+                key,
+                data,
+                blob: blob.to_string(),
+            },
+        )
+        .await;
 
     Ok(())
 }

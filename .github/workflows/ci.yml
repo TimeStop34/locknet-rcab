@@ -1,0 +1,61 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  check:
+    name: fmt, clippy, build, docs, unit tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      # ---------------- format ----------------
+      - name: cargo fmt --check
+        run: cargo fmt --all --check
+
+      # ---------------- clippy ----------------
+      - name: cargo clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: cargo clippy (all features)
+        run: cargo clippy --all-features --all-targets -- -D warnings
+
+      # ---------------- build ----------------
+      - name: cargo build (default features)
+        run: cargo build --all-targets
+
+      - name: cargo build (all features)
+        run: cargo build --all-features --all-targets
+
+      # ---------------- docs ----------------
+      - name: cargo doc (all features, no deps)
+        run: cargo doc --no-deps --all-features
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      # ---------------- unit tests (in src/) ----------------
+      - name: cargo test --lib (all features)
+        run: cargo test --all-features --lib -- --test-threads=1
+
+      # ---------------- sqlite store tests (no server needed) ----------------
+      - name: cargo test (sqlite_store, all features)
+        run: cargo test --all-features --test sqlite_store -- --test-threads=1
+
+      # ---------------- doctests (compile-only; examples are `no_run`) ----------------
+      - name: cargo test --doc (all features)
+        run: cargo test --all-features --doc

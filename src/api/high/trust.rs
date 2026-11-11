@@ -35,10 +35,7 @@ impl TrustGraph {
     ///
     /// Returns an error if the underlying `query_cross_signing_keys` call
     /// fails (e.g. transport error, request timeout).
-    pub async fn build(
-        low: &Arc<LockNetLowAgent>,
-        user_ids: &[i64],
-    ) -> Result<Self> {
+    pub async fn build(low: &Arc<LockNetLowAgent>, user_ids: &[i64]) -> Result<Self> {
         if user_ids.is_empty() {
             return Ok(Self::default());
         }

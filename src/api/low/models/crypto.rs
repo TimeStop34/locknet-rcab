@@ -5,9 +5,9 @@
 //! `"master"` (MSK signs SSK/USK) or `"user_signing"` (USK signs another
 //! user's MSK) or `"self_signing"` (SSK signs a device ed25519).
 
-use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
 use super::keys::SignaturesMap;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 
 /// One cross-signing public key with its signatures.
 #[derive(Debug, Clone, Serialize, Deserialize)]

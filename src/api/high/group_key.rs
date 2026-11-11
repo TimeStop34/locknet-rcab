@@ -6,11 +6,11 @@
 
 use std::sync::Arc;
 
+use super::security::SecurityHelper;
 use crate::api::low::agent::LockNetLowAgent;
 use crate::api::low::helpers::megolm::MegolmSessionInfo;
 use crate::core::errors::Result;
 use crate::core::policies::MegolmRotationVisibility;
-use super::security::SecurityHelper;
 
 /// Share the current Megolm key with eligible member sessions.
 ///

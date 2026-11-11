@@ -1,13 +1,5 @@
 //! [`Chat`] — a handle to a group with high-level send/receive methods.
 
-use std::sync::Arc;
-use std::time::Duration;
-use chrono::{DateTime, Utc};
-use tokio::sync::{broadcast, RwLock};
-use crate::api::low::agent::LockNetLowAgent;
-use crate::api::low::models::Encrypted;
-use crate::core::crypto::megolm::MEGOLM_ALGORITHM;
-use crate::core::errors::{LockNetError, Result};
 use super::group::Group;
 use super::message::Message;
 use super::reaction::Reaction;
@@ -15,6 +7,14 @@ use super::user::User;
 use crate::api::high::event::HighEvent;
 use crate::api::high::security::SecurityHelper;
 use crate::api::high::state::ClientState;
+use crate::api::low::agent::LockNetLowAgent;
+use crate::api::low::models::Encrypted;
+use crate::core::crypto::megolm::MEGOLM_ALGORITHM;
+use crate::core::errors::{LockNetError, Result};
+use chrono::{DateTime, Utc};
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::{broadcast, RwLock};
 
 pub(crate) const PLAINTEXT_ALGORITHM: &str = "ln.plaintext.v1";
 
@@ -38,7 +38,9 @@ pub(crate) struct ChatInner {
 /// A `Chat` is a lightweight handle: cloning it is cheap, and multiple clones
 /// share the same underlying `ChatInner`.
 #[derive(Clone)]
-pub struct Chat { pub(crate) inner: Arc<ChatInner> }
+pub struct Chat {
+    pub(crate) inner: Arc<ChatInner>,
+}
 
 impl Chat {
     pub(crate) fn new(
@@ -61,43 +63,68 @@ impl Chat {
     }
 
     /// Group ID.
-    pub fn id(&self) -> i64 { self.inner.group.id }
+    pub fn id(&self) -> i64 {
+        self.inner.group.id
+    }
 
     /// Group name.
-    pub fn name(&self) -> String { self.inner.group.name.clone() }
+    pub fn name(&self) -> String {
+        self.inner.group.name.clone()
+    }
 
     /// Whether the group is public.
-    pub fn is_public(&self) -> bool { self.inner.group.is_public }
+    pub fn is_public(&self) -> bool {
+        self.inner.group.is_public
+    }
 
     /// Whether this is a 1-to-1 chat.
-    pub fn is_direct(&self) -> bool { self.inner.group.is_direct() }
+    pub fn is_direct(&self) -> bool {
+        self.inner.group.is_direct()
+    }
 
     /// Whether messages in this chat are E2EE.
     ///
     /// Private groups are always encrypted; public groups use plaintext
     /// (`ln.plaintext.v1`).
-    pub fn is_encrypted(&self) -> bool { !self.inner.group.is_public }
+    pub fn is_encrypted(&self) -> bool {
+        !self.inner.group.is_public
+    }
 
     /// Public handle, `None` for private groups.
-    pub fn public_id(&self) -> Option<String> { self.inner.group.public_id.clone() }
+    pub fn public_id(&self) -> Option<String> {
+        self.inner.group.public_id.clone()
+    }
 
     /// Creator's user ID.
-    pub fn created_by(&self) -> i64 { self.inner.group.created_by }
+    pub fn created_by(&self) -> i64 {
+        self.inner.group.created_by
+    }
 
     /// Creation timestamp.
-    pub fn created_at(&self) -> DateTime<Utc> { self.inner.group.created_at }
+    pub fn created_at(&self) -> DateTime<Utc> {
+        self.inner.group.created_at
+    }
 
     /// Resolved member list. Empty if this instance was built without member
     /// data.
     pub fn members(&self) -> Vec<User> {
-        self.inner.group.members.iter().map(|m| m.user.clone()).collect()
+        self.inner
+            .group
+            .members
+            .iter()
+            .map(|m| m.user.clone())
+            .collect()
     }
 
     /// Number of members.
-    pub fn member_count(&self) -> usize { self.inner.group.member_count }
+    pub fn member_count(&self) -> usize {
+        self.inner.group.member_count
+    }
 
     /// The underlying [`Group`] model.
-    pub fn group(&self) -> &Group { &self.inner.group }
+    pub fn group(&self) -> &Group {
+        &self.inner.group
+    }
 
     /// Re-fetch the group from the server (metadata only).
     ///
@@ -119,7 +146,14 @@ impl Chat {
             return Ok(());
         }
 
-        if self.inner.low.store().group_data_state(self.id()).await.is_some() {
+        if self
+            .inner
+            .low
+            .store()
+            .group_data_state(self.id())
+            .await
+            .is_some()
+        {
             return Ok(());
         }
 
@@ -127,7 +161,8 @@ impl Chat {
         if !is_creator {
             return Err(LockNetError::InvalidArgument(
                 "cannot send: group policy unknown (no local group_data, not creator). \
-                 Call request_missing_keys() first.".into(),
+                 Call request_missing_keys() first."
+                    .into(),
             ));
         }
 
@@ -135,7 +170,8 @@ impl Chat {
             if fresh.encrypted_group_data.is_some() {
                 return Err(LockNetError::InvalidArgument(
                     "cannot send: server has group policy blob but local key missing. \
-                     Call request_missing_keys() to recover.".into(),
+                     Call request_missing_keys() to recover."
+                        .into(),
                 ));
             }
         }
@@ -244,8 +280,7 @@ impl Chat {
             .await?;
         }
 
-        *self.inner.coverage.write().await =
-            Some((info.megolm_session_id.clone(), member_count));
+        *self.inner.coverage.write().await = Some((info.megolm_session_id.clone(), member_count));
 
         Ok(())
     }
@@ -272,8 +307,10 @@ impl Chat {
     /// - [`LockNetError::Server`] with code `not_a_member`,
     ///   `message_too_large`, or `rate_limited`.
     /// - [`LockNetError::Timeout`] on transport timeout.
+    #[tracing::instrument(skip(self, text), fields(chat_id = self.id()))]
     pub async fn send(&self, text: impl Into<String>) -> Result<Message> {
         let text = text.into();
+        tracing::Span::current().record("text_len", text.len());
         let chat_id = self.id();
         let low = self.inner.low.clone();
 
@@ -323,7 +360,12 @@ impl Chat {
         let chat_id = self.id();
         let low = self.inner.low.clone();
         let ack = low.messages().send(chat_id, encrypted.clone()).await?;
-        let text = low.megolm().decrypt(chat_id, &encrypted).await.ok().flatten();
+        let text = low
+            .megolm()
+            .decrypt(chat_id, &encrypted)
+            .await
+            .ok()
+            .flatten();
         Ok(Message {
             id: ack.message_id,
             chat_id,
@@ -354,6 +396,7 @@ impl Chat {
     ///
     /// - [`LockNetError::Server`] with code `not_a_member` or
     ///   `invalid_limit`.
+    #[tracing::instrument(skip(self), fields(chat_id = self.id(), limit = limit))]
     pub async fn messages(&self, before: Option<i64>, limit: u32) -> Result<Vec<Message>> {
         let chat_id = self.id();
         let low = self.inner.low.clone();
@@ -370,7 +413,9 @@ impl Chat {
                     } else {
                         let t = low.megolm().decrypt(chat_id, enc).await.ok().flatten();
                         let was_enc = t.is_none();
-                        if was_enc { missing.push(dto.message_id); }
+                        if was_enc {
+                            missing.push(dto.message_id);
+                        }
                         (t, true)
                     }
                 }
@@ -389,15 +434,23 @@ impl Chat {
                 created_at: dto.created_at,
                 edited_at: dto.edited_at,
                 deleted: dto.deleted,
-                reactions: dto.reactions.into_iter()
-                    .map(|r| Reaction { emoji: r.emoji, user_ids: r.user_ids, count: r.count })
+                reactions: dto
+                    .reactions
+                    .into_iter()
+                    .map(|r| Reaction {
+                        emoji: r.emoji,
+                        user_ids: r.user_ids,
+                        count: r.count,
+                    })
                     .collect(),
             });
         }
 
         if !missing.is_empty() {
             let mut st = self.inner.state.write().await;
-            for mid in &missing { st.push_pending_decrypt(chat_id, *mid); }
+            for mid in &missing {
+                st.push_pending_decrypt(chat_id, *mid);
+            }
         }
         Ok(result)
     }
@@ -425,6 +478,7 @@ impl Chat {
     /// - [`LockNetError::Timeout`] if no responder replies within 30s.
     /// - [`LockNetError::Server`] with code `key_denied` if all candidate
     ///   responders refused.
+    #[tracing::instrument(skip(self), fields(chat_id = self.id()))]
     pub async fn request_missing_keys(&self) -> Result<(usize, u32)> {
         let chat_id = self.id();
         let low = self.inner.low.clone();
@@ -433,25 +487,33 @@ impl Chat {
             let st = self.inner.state.read().await;
             st.pending_decrypt_for(chat_id)
         };
-        if pending.is_empty() { return Ok((0, 0)); }
+        if pending.is_empty() {
+            return Ok((0, 0));
+        }
 
         let our_uid = low.user_id();
         let our_sid = low.session_id();
         let created_by = self.inner.group.created_by;
 
         let mut query_uids: Vec<i64> = vec![our_uid];
-        if created_by != 0 && created_by != our_uid { query_uids.push(created_by); }
+        if created_by != 0 && created_by != our_uid {
+            query_uids.push(created_by);
+        }
         let all_sessions = low.keys().query(query_uids.clone()).await?;
 
         let mut candidates: Vec<(i64, i64)> = Vec::new();
         if let Some(sess) = all_sessions.get(&our_uid) {
             for sid in sess.keys() {
-                if *sid != our_sid { candidates.push((our_uid, *sid)); }
+                if *sid != our_sid {
+                    candidates.push((our_uid, *sid));
+                }
             }
         }
         if created_by != 0 && created_by != our_uid {
             if let Some(sess) = all_sessions.get(&created_by) {
-                for sid in sess.keys() { candidates.push((created_by, *sid)); }
+                for sid in sess.keys() {
+                    candidates.push((created_by, *sid));
+                }
             }
         }
 
@@ -461,9 +523,16 @@ impl Chat {
 
         for (target_uid, target_sid) in candidates {
             let mut high_rx = self.inner.high_event_tx.subscribe();
-            let txid = match low.key_sharing().send_request_only(target_uid, target_sid, vec![chat_id]).await {
+            let txid = match low
+                .key_sharing()
+                .send_request_only(target_uid, target_sid, vec![chat_id])
+                .await
+            {
                 Ok(t) => t,
-                Err(e) => { last_err = Some(e); continue; }
+                Err(e) => {
+                    last_err = Some(e);
+                    continue;
+                }
             };
 
             let mut session_imported = 0u32;
@@ -473,19 +542,36 @@ impl Chat {
             let deadline = tokio::time::Instant::now() + KEY_REQUEST_TIMEOUT;
             loop {
                 let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                if remaining.is_zero() { last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT)); break; }
+                if remaining.is_zero() {
+                    last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT));
+                    break;
+                }
                 match tokio::time::timeout(remaining, high_rx.recv()).await {
-                    Ok(Ok(HighEvent::KeyRequestImported { txid: t, .. })) if t == txid => { session_imported += 1; }
-                    Ok(Ok(HighEvent::KeyRequestDone { txid: t, total_imported })) if t == txid => {
-                        session_imported = total_imported; session_done = true; break;
+                    Ok(Ok(HighEvent::KeyRequestImported { txid: t, .. })) if t == txid => {
+                        session_imported += 1;
+                    }
+                    Ok(Ok(HighEvent::KeyRequestDone {
+                        txid: t,
+                        total_imported,
+                    })) if t == txid => {
+                        session_imported = total_imported;
+                        session_done = true;
+                        break;
                     }
                     Ok(Ok(HighEvent::KeyRequestDenied { txid: t, reason })) if t == txid => {
-                        denied_reason = Some(reason); break;
+                        denied_reason = Some(reason);
+                        break;
                     }
                     Ok(Ok(_)) => continue,
                     Ok(Err(broadcast::error::RecvError::Lagged(_))) => continue,
-                    Ok(Err(_)) => { last_err = Some(LockNetError::RunnerDown); break; }
-                    Err(_) => { last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT)); break; }
+                    Ok(Err(_)) => {
+                        last_err = Some(LockNetError::RunnerDown);
+                        break;
+                    }
+                    Err(_) => {
+                        last_err = Some(LockNetError::Timeout(KEY_REQUEST_TIMEOUT));
+                        break;
+                    }
                 }
             }
 
@@ -495,14 +581,22 @@ impl Chat {
                 break;
             }
             if let Some(r) = denied_reason {
-                last_err = Some(LockNetError::Server { code: "key_denied".into(), message: r });
+                last_err = Some(LockNetError::Server {
+                    code: "key_denied".into(),
+                    message: r,
+                });
             }
         }
 
-        { let mut st = self.inner.state.write().await; st.clear_pending_decrypt(chat_id); }
+        {
+            let mut st = self.inner.state.write().await;
+            st.clear_pending_decrypt(chat_id);
+        }
 
         if !any_done && imported_total == 0 {
-            if let Some(e) = last_err { return Err(e); }
+            if let Some(e) = last_err {
+                return Err(e);
+            }
         }
         Ok((pending.len(), imported_total))
     }
@@ -563,7 +657,11 @@ impl Chat {
     /// - [`LockNetError::Server`] with code `message_not_found`,
     ///   `message_deleted`, `not_a_member`, or `invalid_emoji`.
     pub async fn add_reaction(&self, message_id: i64, emoji: impl Into<String>) -> Result<()> {
-        self.inner.low.messages().add_reaction(message_id, emoji).await
+        self.inner
+            .low
+            .messages()
+            .add_reaction(message_id, emoji)
+            .await
     }
 
     /// Remove your own reaction.
@@ -573,7 +671,11 @@ impl Chat {
     /// - [`LockNetError::Server`] with code `message_not_found` or
     ///   `reaction_not_found`.
     pub async fn remove_reaction(&self, message_id: i64, emoji: impl Into<String>) -> Result<()> {
-        self.inner.low.messages().remove_reaction(message_id, emoji).await
+        self.inner
+            .low
+            .messages()
+            .remove_reaction(message_id, emoji)
+            .await
     }
 }
 

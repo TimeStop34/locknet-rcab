@@ -14,14 +14,20 @@ pub mod account;
 pub mod group_data;
 pub mod megolm;
 pub mod olm;
+pub mod random;
 pub mod signature;
-pub mod sqlite_store;
 pub mod store;
 
 pub use account::Account;
-pub use group_data::{decrypt_group_data, encrypt_group_data, derive_group_data_encryption_key};
+pub use group_data::{decrypt_group_data, derive_group_data_encryption_key, encrypt_group_data};
 pub use megolm::MEGOLM_ALGORITHM;
 pub use olm::{EncryptedOlm, OlmSessionEntry, OLM_ALGORITHM};
+pub use random::{fill_random, random_bytes, random_txid};
 pub use signature::{sign, sign_b64, verify, verify_b64, CrossSigningKeysPrivate};
-pub use sqlite_store::SqliteStore;
 pub use store::{CryptoStore, InMemoryStore};
+
+#[cfg(feature = "sqlite")]
+pub mod sqlite_store;
+
+#[cfg(feature = "sqlite")]
+pub use sqlite_store::SqliteStore;

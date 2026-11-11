@@ -60,9 +60,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -112,12 +121,7 @@ async fn upload_keys_for_low(low: &LockNetLowAgent) {
     low.keys().upload(keys).await.expect("upload_keys");
 }
 
-async fn setup_olm(
-    a_low: &LockNetLowAgent,
-    b_low: &LockNetLowAgent,
-    b_uid: i64,
-    b_sid: i64,
-) {
+async fn setup_olm(a_low: &LockNetLowAgent, b_low: &LockNetLowAgent, b_uid: i64, b_sid: i64) {
     let mut rx = b_low.subscribe();
     a_low
         .olm()
@@ -126,8 +130,15 @@ async fn setup_olm(
         .await
         .expect("olm forward setup");
     let evt = common::wait_event(&mut rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    b_low.olm().decrypt(p).wait().await.expect("forward setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    b_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("forward setup decrypt");
 
     let mut rx2 = a_low.subscribe();
     b_low
@@ -137,8 +148,15 @@ async fn setup_olm(
         .await
         .expect("olm reverse setup");
     let evt = common::wait_event(&mut rx2, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    a_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    a_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("reverse setup decrypt");
 }
 
 // ---- tests ----
@@ -173,14 +191,32 @@ async fn key_sharing_full_flow() {
 
     let info1 = alice_low.megolm().create(group_id).await.expect("create 1");
     let enc1 = alice_low.megolm().encrypt(group_id, "msg1").await.unwrap();
-    let ack1 = alice_low.messages().send(group_id, enc1.clone()).await.unwrap();
+    let ack1 = alice_low
+        .messages()
+        .send(group_id, enc1.clone())
+        .await
+        .unwrap();
 
     let info2 = alice_low.megolm().rotate(group_id).await.expect("rotate");
     let enc2 = alice_low.megolm().encrypt(group_id, "msg2").await.unwrap();
-    let ack2 = alice_low.messages().send(group_id, enc2.clone()).await.unwrap();
+    let ack2 = alice_low
+        .messages()
+        .send(group_id, enc2.clone())
+        .await
+        .unwrap();
 
-    assert!(bob_low.megolm().decrypt(group_id, &enc1).await.unwrap().is_none());
-    assert!(bob_low.megolm().decrypt(group_id, &enc2).await.unwrap().is_none());
+    assert!(bob_low
+        .megolm()
+        .decrypt(group_id, &enc1)
+        .await
+        .unwrap()
+        .is_none());
+    assert!(bob_low
+        .megolm()
+        .decrypt(group_id, &enc2)
+        .await
+        .unwrap()
+        .is_none());
 
     let mut alice_rx = alice_low.subscribe();
     let mut bob_flow = bob_low
@@ -198,7 +234,10 @@ async fn key_sharing_full_flow() {
 
     assert_eq!(incoming.transaction_id, txid);
     assert_eq!(incoming.chat_ids, vec![group_id]);
-    assert!(incoming.have.is_empty(), "bob has no keys yet, have must be empty");
+    assert!(
+        incoming.have.is_empty(),
+        "bob has no keys yet, have must be empty"
+    );
 
     alice_low
         .key_sharing()
@@ -238,7 +277,10 @@ async fn key_sharing_full_flow() {
             .expect("bob next timeout")
             .expect("bob next");
         match step {
-            KeyRequestStep::GroupKeyImported { chat_id, megolm_session_id } => {
+            KeyRequestStep::GroupKeyImported {
+                chat_id,
+                megolm_session_id,
+            } => {
                 assert_eq!(chat_id, group_id);
                 imported.push(megolm_session_id);
             }
@@ -253,9 +295,19 @@ async fn key_sharing_full_flow() {
     assert_eq!(bob_flow.imported_count(), 2);
     assert_eq!(imported.len(), 2);
 
-    let pt1 = bob_low.megolm().decrypt(group_id, &enc1).await.unwrap().unwrap();
+    let pt1 = bob_low
+        .megolm()
+        .decrypt(group_id, &enc1)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pt1, "msg1");
-    let pt2 = bob_low.megolm().decrypt(group_id, &enc2).await.unwrap().unwrap();
+    let pt2 = bob_low
+        .megolm()
+        .decrypt(group_id, &enc2)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pt2, "msg2");
 
     // Done is sticky.
@@ -299,7 +351,11 @@ async fn key_sharing_have_filters() {
 
     bob_low
         .megolm()
-        .import(group_id, info1.megolm_session_id.clone(), info1.session_key.clone())
+        .import(
+            group_id,
+            info1.megolm_session_id.clone(),
+            info1.session_key.clone(),
+        )
         .await
         .expect("bob pre-import session1");
 
@@ -325,17 +381,33 @@ async fn key_sharing_have_filters() {
     let have_set: std::collections::HashSet<String> = incoming.have.iter().cloned().collect();
     let mut sent = 0u32;
     if !have_set.contains(&format!("{}:{}", group_id, info1.megolm_session_id)) {
-        alice_low.key_sharing().send_group_key(
-            bob_uid, incoming.from_session, txid.clone(), group_id,
-            info1.megolm_session_id.clone(), info1.session_key.clone(),
-        ).await.unwrap();
+        alice_low
+            .key_sharing()
+            .send_group_key(
+                bob_uid,
+                incoming.from_session,
+                txid.clone(),
+                group_id,
+                info1.megolm_session_id.clone(),
+                info1.session_key.clone(),
+            )
+            .await
+            .unwrap();
         sent += 1;
     }
     if !have_set.contains(&format!("{}:{}", group_id, info2.megolm_session_id)) {
-        alice_low.key_sharing().send_group_key(
-            bob_uid, incoming.from_session, txid.clone(), group_id,
-            info2.megolm_session_id.clone(), info2.session_key.clone(),
-        ).await.unwrap();
+        alice_low
+            .key_sharing()
+            .send_group_key(
+                bob_uid,
+                incoming.from_session,
+                txid.clone(),
+                group_id,
+                info2.megolm_session_id.clone(),
+                info2.session_key.clone(),
+            )
+            .await
+            .unwrap();
         sent += 1;
     }
     assert_eq!(sent, 1);
@@ -354,7 +426,9 @@ async fn key_sharing_have_filters() {
             .expect("timeout")
             .expect("next");
         match step {
-            KeyRequestStep::GroupKeyImported { megolm_session_id, .. } => {
+            KeyRequestStep::GroupKeyImported {
+                megolm_session_id, ..
+            } => {
                 imported_count += 1;
                 assert_eq!(megolm_session_id, info2.megolm_session_id);
             }
@@ -412,7 +486,12 @@ async fn key_sharing_denied() {
 
     alice_low
         .key_sharing()
-        .send_denied(bob_uid, incoming.from_session, txid, "not trusted".to_string())
+        .send_denied(
+            bob_uid,
+            incoming.from_session,
+            txid,
+            "not trusted".to_string(),
+        )
         .await
         .expect("send_denied");
 
@@ -560,8 +639,16 @@ async fn key_sharing_second_device_recovers_history() {
 
     setup_olm(&alice_low, &bob1_low, bob_uid, bob1_sid).await;
     let info = alice_low.megolm().create(group_id).await.expect("create");
-    let enc = alice_low.megolm().encrypt(group_id, "for history").await.unwrap();
-    let _ack = alice_low.messages().send(group_id, enc.clone()).await.unwrap();
+    let enc = alice_low
+        .megolm()
+        .encrypt(group_id, "for history")
+        .await
+        .unwrap();
+    let _ack = alice_low
+        .messages()
+        .send(group_id, enc.clone())
+        .await
+        .unwrap();
 
     let mut bob1_rx = bob1_low.subscribe();
     alice_low
@@ -570,11 +657,22 @@ async fn key_sharing_second_device_recovers_history() {
         .await
         .expect("share");
     let evt = common::wait_event(&mut bob1_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(td) = evt else { unreachable!() };
+    let Event::ToDevice(td) = evt else {
+        unreachable!()
+    };
     let pt = bob1_low.olm().decrypt(td).wait().await.unwrap().unwrap();
-    bob1_low.megolm().decrypt_group_key(&pt).await.expect("import");
+    bob1_low
+        .megolm()
+        .decrypt_group_key(&pt)
+        .await
+        .expect("import");
     assert_eq!(
-        bob1_low.megolm().decrypt(group_id, &enc).await.unwrap().unwrap(),
+        bob1_low
+            .megolm()
+            .decrypt(group_id, &enc)
+            .await
+            .unwrap()
+            .unwrap(),
         "for history"
     );
 
@@ -600,7 +698,12 @@ async fn key_sharing_second_device_recovers_history() {
     setup_olm(&alice_low, &bob2_low, bob_uid, bob2_sid).await;
 
     // Bob2 has no Megolm key — cannot decrypt.
-    assert!(bob2_low.megolm().decrypt(group_id, &enc).await.unwrap().is_none());
+    assert!(bob2_low
+        .megolm()
+        .decrypt(group_id, &enc)
+        .await
+        .unwrap()
+        .is_none());
 
     let mut alice_rx = alice_low.subscribe();
     let mut bob2_flow = bob2_low
@@ -617,7 +720,11 @@ async fn key_sharing_second_device_recovers_history() {
         .expect("alice wait_request");
     assert_eq!(incoming.transaction_id, txid);
 
-    let (alice_session_key, _) = alice_low.megolm().ensure_session(group_id).await.expect("ensure");
+    let (alice_session_key, _) = alice_low
+        .megolm()
+        .ensure_session(group_id)
+        .await
+        .expect("ensure");
     assert_eq!(alice_session_key.megolm_session_id, info.megolm_session_id);
 
     alice_low
@@ -660,7 +767,12 @@ async fn key_sharing_second_device_recovers_history() {
         "Bob2 must receive group_data as part of key_request"
     );
 
-    let pt = bob2_low.megolm().decrypt(group_id, &enc).await.unwrap().unwrap();
+    let pt = bob2_low
+        .megolm()
+        .decrypt(group_id, &enc)
+        .await
+        .unwrap()
+        .unwrap();
     assert_eq!(pt, "for history");
 
     bob2_client.disconnect().await.ok();

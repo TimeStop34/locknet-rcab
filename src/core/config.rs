@@ -1,8 +1,8 @@
 //! Configuration types for [`crate::LockNetClient`].
 
+use crate::core::policies::{HistoryVisibility, MegolmRotationVisibility};
 use std::time::Duration;
 use url::Url;
-use crate::core::policies::{HistoryVisibility, MegolmRotationVisibility};
 
 /// Connection and behavior configuration for [`crate::LockNetClient`].
 ///
@@ -138,9 +138,17 @@ impl LockNetConfig {
     ///
     /// Uses `wss` for `https` bases and `ws` for `http` bases.
     pub fn ws_url(&self) -> String {
-        let scheme = if self.base_url.scheme() == "https" { "wss" } else { "ws" };
+        let scheme = if self.base_url.scheme() == "https" {
+            "wss"
+        } else {
+            "ws"
+        };
         let host = self.base_url.host_str().unwrap_or("localhost");
-        let port = self.base_url.port().map(|p| format!(":{}", p)).unwrap_or_default();
+        let port = self
+            .base_url
+            .port()
+            .map(|p| format!(":{}", p))
+            .unwrap_or_default();
         format!("{}://{}{}/ws", scheme, host, port)
     }
 

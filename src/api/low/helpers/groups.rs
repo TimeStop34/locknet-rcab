@@ -1,14 +1,16 @@
 //! Groups and invitations helper.
 
-use serde_json::json;
 use crate::api::low::command::{dispatch, dispatch_unit, CmdSender};
 use crate::api::low::models::*;
 use crate::core::errors::Result;
+use serde_json::json;
 
 /// Wraps the `/api/v1/groups` WebSocket methods.
 ///
 /// Obtained via [`crate::LockNetLowAgent::groups`].
-pub struct LockNetGroupsHelper { pub(crate) cmd_tx: CmdSender }
+pub struct LockNetGroupsHelper {
+    pub(crate) cmd_tx: CmdSender,
+}
 
 impl LockNetGroupsHelper {
     /// Create a group.
@@ -30,8 +32,17 @@ impl LockNetGroupsHelper {
     ///   group already uses `public_id`.
     /// - [`crate::LockNetError::Server`] with code `users_not_found` if any ID in
     ///   `participant_ids` does not exist.
-    pub async fn create(&self, name: impl Into<String>, is_public: bool, public_id: Option<String>, participant_ids: Vec<i64>) -> Result<Group> {
-        #[derive(serde::Deserialize)] struct W { group: Group }
+    pub async fn create(
+        &self,
+        name: impl Into<String>,
+        is_public: bool,
+        public_id: Option<String>,
+        participant_ids: Vec<i64>,
+    ) -> Result<Group> {
+        #[derive(serde::Deserialize)]
+        struct W {
+            group: Group,
+        }
         let w: W = dispatch(&self.cmd_tx, json!({
             "type": "create_group",
             "data": { "name": name.into(), "is_public": is_public, "public_id": public_id, "participant_ids": participant_ids }
@@ -50,8 +61,15 @@ impl LockNetGroupsHelper {
     ///   `other_user_id` equals the current user.
     /// - [`crate::LockNetError::Server`] with code `user_not_found`.
     pub async fn create_direct(&self, other_user_id: i64) -> Result<Group> {
-        #[derive(serde::Deserialize)] struct W { group: Group }
-        let w: W = dispatch(&self.cmd_tx, json!({ "type": "create_direct", "data": { "user_id": other_user_id } })).await?;
+        #[derive(serde::Deserialize)]
+        struct W {
+            group: Group,
+        }
+        let w: W = dispatch(
+            &self.cmd_tx,
+            json!({ "type": "create_direct", "data": { "user_id": other_user_id } }),
+        )
+        .await?;
         Ok(w.group)
     }
 
@@ -63,8 +81,15 @@ impl LockNetGroupsHelper {
     ///   does not exist or is not public.
     /// - [`crate::LockNetError::Server`] with code `already_member`.
     pub async fn join(&self, public_id: impl Into<String>) -> Result<Group> {
-        #[derive(serde::Deserialize)] struct W { group: Group }
-        let w: W = dispatch(&self.cmd_tx, json!({ "type": "join_group", "data": { "public_id": public_id.into() } })).await?;
+        #[derive(serde::Deserialize)]
+        struct W {
+            group: Group,
+        }
+        let w: W = dispatch(
+            &self.cmd_tx,
+            json!({ "type": "join_group", "data": { "public_id": public_id.into() } }),
+        )
+        .await?;
         Ok(w.group)
     }
 
@@ -78,12 +103,19 @@ impl LockNetGroupsHelper {
     /// - [`crate::LockNetError::Server`] with code `not_member`.
     /// - [`crate::LockNetError::Server`] with code `group_not_found`.
     pub async fn leave(&self, group_id: i64) -> Result<()> {
-        dispatch_unit(&self.cmd_tx, json!({ "type": "leave_group", "data": { "group_id": group_id } })).await
+        dispatch_unit(
+            &self.cmd_tx,
+            json!({ "type": "leave_group", "data": { "group_id": group_id } }),
+        )
+        .await
     }
 
     /// List all groups the current user is a member of.
     pub async fn list(&self) -> Result<Vec<Group>> {
-        #[derive(serde::Deserialize)] struct W { groups: Vec<Group> }
+        #[derive(serde::Deserialize)]
+        struct W {
+            groups: Vec<Group>,
+        }
         let w: W = dispatch(&self.cmd_tx, json!({ "type": "get_groups", "data": {} })).await?;
         Ok(w.groups)
     }
@@ -99,14 +131,24 @@ impl LockNetGroupsHelper {
     /// - [`crate::LockNetError::Server`] with code `group_not_found` if the group
     ///   does not exist, or is private and the caller is not a member.
     pub async fn info(&self, group_id: i64) -> Result<Group> {
-        #[derive(serde::Deserialize)] struct W { group: Group }
-        let w: W = dispatch(&self.cmd_tx, json!({ "type": "get_group_info", "data": { "group_id": group_id } })).await?;
+        #[derive(serde::Deserialize)]
+        struct W {
+            group: Group,
+        }
+        let w: W = dispatch(
+            &self.cmd_tx,
+            json!({ "type": "get_group_info", "data": { "group_id": group_id } }),
+        )
+        .await?;
         Ok(w.group)
     }
 
     /// List pending invitations for the current user.
     pub async fn invites(&self) -> Result<Vec<Invite>> {
-        #[derive(serde::Deserialize)] struct W { invites: Vec<Invite> }
+        #[derive(serde::Deserialize)]
+        struct W {
+            invites: Vec<Invite>,
+        }
         let w: W = dispatch(&self.cmd_tx, json!({ "type": "get_invites", "data": {} })).await?;
         Ok(w.invites)
     }
@@ -119,7 +161,11 @@ impl LockNetGroupsHelper {
     ///   does not exist, was already processed, or the group was deleted.
     /// - [`crate::LockNetError::Server`] with code `already_member`.
     pub async fn accept_invite(&self, invite_id: i64) -> Result<()> {
-        dispatch_unit(&self.cmd_tx, json!({ "type": "accept_invite", "data": { "invite_id": invite_id } })).await
+        dispatch_unit(
+            &self.cmd_tx,
+            json!({ "type": "accept_invite", "data": { "invite_id": invite_id } }),
+        )
+        .await
     }
 
     /// Decline an invitation.
@@ -129,7 +175,11 @@ impl LockNetGroupsHelper {
     /// - [`crate::LockNetError::Server`] with code `invite_not_found` if the invite
     ///   does not exist or was already processed.
     pub async fn decline_invite(&self, invite_id: i64) -> Result<()> {
-        dispatch_unit(&self.cmd_tx, json!({ "type": "decline_invite", "data": { "invite_id": invite_id } })).await
+        dispatch_unit(
+            &self.cmd_tx,
+            json!({ "type": "decline_invite", "data": { "invite_id": invite_id } }),
+        )
+        .await
     }
 
     /// Upload a new `encrypted_group_data` blob for `group_id`.
@@ -143,7 +193,11 @@ impl LockNetGroupsHelper {
     /// - [`crate::LockNetError::Server`] with code `group_not_found`.
     /// - [`crate::LockNetError::Server`] with code `forbidden` if the caller is not
     ///   the creator.
-    pub async fn update_group_data(&self, group_id: i64, encrypted_group_data: impl Into<String>) -> Result<()> {
+    pub async fn update_group_data(
+        &self,
+        group_id: i64,
+        encrypted_group_data: impl Into<String>,
+    ) -> Result<()> {
         dispatch_unit(&self.cmd_tx, json!({
             "type": "update_group_data",
             "data": { "group_id": group_id, "encrypted_group_data": encrypted_group_data.into() }

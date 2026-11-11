@@ -44,8 +44,7 @@ pub fn encrypt_group_data(data: &GroupData, group_data_key: &[u8; 32]) -> Result
     let cipher = XSalsa20Poly1305::new(GenericArray::from_slice(&key));
 
     let plaintext = serde_json::to_vec(data)?;
-    let mut nonce_bytes = [0u8; NONCE_LEN];
-    getrandom::getrandom(&mut nonce_bytes).expect("getrandom");
+    let nonce_bytes = super::random::random_bytes::<NONCE_LEN>()?;
     let nonce = GenericArray::from_slice(&nonce_bytes);
 
     let ct = cipher
@@ -83,13 +82,9 @@ pub fn decrypt_group_data(blob_b64: &str, group_data_key: &[u8; 32]) -> Result<G
     let (nonce_bytes, ct) = blob.split_at(NONCE_LEN);
     let nonce = GenericArray::from_slice(nonce_bytes);
 
-    let plaintext = cipher
-        .decrypt(nonce, ct)
-        .map_err(|_| {
-            LockNetError::InvalidArgument(
-                "group_data decrypt failed (wrong key or tampered)".into(),
-            )
-        })?;
+    let plaintext = cipher.decrypt(nonce, ct).map_err(|_| {
+        LockNetError::InvalidArgument("group_data decrypt failed (wrong key or tampered)".into())
+    })?;
 
     serde_json::from_slice(&plaintext)
         .map_err(|e| LockNetError::InvalidArgument(format!("group_data json: {e}")))

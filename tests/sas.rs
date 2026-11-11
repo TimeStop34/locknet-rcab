@@ -65,9 +65,18 @@ fn build_cs_payload(user_id: i64, keys: &CrossSigningKeysPrivate) -> CrossSignin
     usk_sigs.insert(user_id.to_string(), usk_inner);
 
     CrossSigningKeys {
-        master_key: CrossSigningKey { key: msk_pub, signatures: HashMap::new() },
-        self_signing_key: CrossSigningKey { key: ssk_pub, signatures: ssk_sigs },
-        user_signing_key: CrossSigningKey { key: usk_pub, signatures: usk_sigs },
+        master_key: CrossSigningKey {
+            key: msk_pub,
+            signatures: HashMap::new(),
+        },
+        self_signing_key: CrossSigningKey {
+            key: ssk_pub,
+            signatures: ssk_sigs,
+        },
+        user_signing_key: CrossSigningKey {
+            key: usk_pub,
+            signatures: usk_sigs,
+        },
     }
 }
 
@@ -126,8 +135,15 @@ async fn setup_olm(
         .await
         .expect("olm forward setup");
     let evt = common::wait_event(&mut rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    bob_low.olm().decrypt(p).wait().await.expect("forward setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    bob_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("forward setup decrypt");
 
     let mut rx2 = alice_low.subscribe();
     bob_low
@@ -137,8 +153,15 @@ async fn setup_olm(
         .await
         .expect("olm reverse setup");
     let evt = common::wait_event(&mut rx2, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
-    alice_low.olm().decrypt(p).wait().await.expect("reverse setup decrypt");
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
+    alice_low
+        .olm()
+        .decrypt(p)
+        .wait()
+        .await
+        .expect("reverse setup decrypt");
 }
 
 /// Query the peer's `ed25519` (by session) and `msk` (by user).
@@ -147,11 +170,7 @@ async fn setup_olm(
 /// responder can recompute the initiator's MACs. The whole point of the MAC
 /// exchange is that the peer's *published* keys match what was used in the
 /// handshake.
-async fn peer_keys(
-    observer: &LockNetLowAgent,
-    peer_uid: i64,
-    peer_sid: i64,
-) -> (String, String) {
+async fn peer_keys(observer: &LockNetLowAgent, peer_uid: i64, peer_sid: i64) -> (String, String) {
     let sessions = observer
         .keys()
         .query(vec![peer_uid])
@@ -209,9 +228,15 @@ async fn sas_full_flow_with_peer_verification() {
     let (peer_ed_a, peer_msk_a) = peer_keys(&alice_low, bob_uid, bob_sid).await;
     let (peer_ed_b, peer_msk_b) = peer_keys(&bob_low, alice_uid, alice_sid).await;
 
-    assert_eq!(b_ed, peer_ed_a, "Alice sees the same ed25519 for Bob's device");
+    assert_eq!(
+        b_ed, peer_ed_a,
+        "Alice sees the same ed25519 for Bob's device"
+    );
     assert_eq!(b_msk, peer_msk_a, "Alice sees the same MSK for Bob");
-    assert_eq!(a_ed, peer_ed_b, "Bob sees the same ed25519 for Alice's device");
+    assert_eq!(
+        a_ed, peer_ed_b,
+        "Bob sees the same ed25519 for Alice's device"
+    );
     assert_eq!(a_msk, peer_msk_b, "Bob sees the same MSK for Alice");
 
     let mut bob_setup_rx = bob_low.subscribe();
@@ -222,7 +247,9 @@ async fn sas_full_flow_with_peer_verification() {
         .expect("alice sas_start");
 
     let evt = common::wait_event(&mut bob_setup_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(start_payload) = evt else { unreachable!() };
+    let Event::ToDevice(start_payload) = evt else {
+        unreachable!()
+    };
     let pt = bob_low
         .olm()
         .decrypt(start_payload)
@@ -243,7 +270,13 @@ async fn sas_full_flow_with_peer_verification() {
 
     let mut bob_flow = bob_low
         .verification()
-        .sas_start_responder(alice_uid, alice_sid, txid.clone(), b_msk.clone(), b_ed.clone())
+        .sas_start_responder(
+            alice_uid,
+            alice_sid,
+            txid.clone(),
+            b_msk.clone(),
+            b_ed.clone(),
+        )
         .await
         .expect("bob responder");
 
@@ -268,7 +301,11 @@ async fn sas_full_flow_with_peer_verification() {
     assert_eq!(emoji_alice.len(), 7);
     assert_eq!(emoji_bob.len(), 7);
     for (i, (a, b)) in emoji_alice.iter().zip(emoji_bob.iter()).enumerate() {
-        assert_eq!(a.symbol, b.symbol, "emoji[{i}] mismatch: {} vs {}", a.symbol, b.symbol);
+        assert_eq!(
+            a.symbol, b.symbol,
+            "emoji[{i}] mismatch: {} vs {}",
+            a.symbol, b.symbol
+        );
     }
 
     alice_flow.set_peer_keys(peer_ed_a, peer_msk_a);
@@ -334,7 +371,9 @@ async fn sas_confirm_without_peer_keys_fails() {
         .expect("alice start");
 
     let evt = common::wait_event(&mut bob_setup_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
     let pt = bob_low.olm().decrypt(p).wait().await.unwrap().unwrap();
     let val: Value = serde_json::from_str(&pt).unwrap();
     let txid = val
@@ -411,7 +450,9 @@ async fn sas_mac_mismatch_cancels() {
         .expect("alice start");
 
     let evt = common::wait_event(&mut bob_setup_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
     let pt = bob_low.olm().decrypt(p).wait().await.unwrap().unwrap();
     let val: Value = serde_json::from_str(&pt).unwrap();
     let txid = val
@@ -422,7 +463,13 @@ async fn sas_mac_mismatch_cancels() {
 
     let mut bob_flow = bob_low
         .verification()
-        .sas_start_responder(alice_uid, alice_sid, txid, b_keys.msk_pub_b64(), b_ed.clone())
+        .sas_start_responder(
+            alice_uid,
+            alice_sid,
+            txid,
+            b_keys.msk_pub_b64(),
+            b_ed.clone(),
+        )
         .await
         .expect("bob responder");
 
@@ -497,7 +544,9 @@ async fn sas_rejection_cancels() {
         .expect("alice start");
 
     let evt = common::wait_event(&mut bob_setup_rx, |e| matches!(e, Event::ToDevice(_))).await;
-    let Event::ToDevice(p) = evt else { unreachable!() };
+    let Event::ToDevice(p) = evt else {
+        unreachable!()
+    };
     let pt = bob_low.olm().decrypt(p).wait().await.unwrap().unwrap();
     let val: Value = serde_json::from_str(&pt).unwrap();
     let txid = val

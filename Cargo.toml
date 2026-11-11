@@ -31,9 +31,27 @@ sha2 = "0.10"
 hmac = "0.12"
 crypto_secretbox = "0.1"
 async-trait = "0.1.92"
-rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher"] }
+rusqlite = { version = "0.40.2", features = ["bundled-sqlcipher"], optional = true }
+subtle = "2"
 
 [dev-dependencies]
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tokio = { version = "1", features = ["full"] }
 tempfile = "3"
 vodozemac = "0.8"
+
+[features]
+default = []
+sqlite = ["dep:rusqlite"]
+
+[[test]]
+name = "sqlite_store"
+required-features = ["sqlite"]
+
+[[test]]
+name = "sqlite_e2e"
+required-features = ["sqlite"]
+
+[[example]]
+name = "persistent_login"
+required-features = ["sqlite"]

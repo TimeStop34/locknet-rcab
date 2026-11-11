@@ -18,7 +18,9 @@ pub struct Account {
 impl Account {
     /// Create a fresh account with newly generated identity keys.
     pub fn new() -> Self {
-        Self { inner: OlmAccount::new() }
+        Self {
+            inner: OlmAccount::new(),
+        }
     }
 
     /// Ed25519 identity key, base64 (unpadded).
@@ -40,7 +42,10 @@ impl Account {
     pub fn one_time_keys_b64(&self) -> HashMap<String, String> {
         let mut otks = HashMap::new();
         for (key_id, public_key) in self.inner.one_time_keys().iter() {
-            otks.insert(format!("curve25519:{}", key_id.to_base64()), public_key.to_base64());
+            otks.insert(
+                format!("curve25519:{}", key_id.to_base64()),
+                public_key.to_base64(),
+            );
         }
         otks
     }
@@ -71,5 +76,7 @@ impl Account {
 }
 
 impl Default for Account {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
