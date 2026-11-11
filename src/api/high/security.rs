@@ -18,6 +18,7 @@ use crate::api::low::models::{
 };
 use crate::core::crypto::signature::{sign_b64, verify_b64, CrossSigningKeysPrivate};
 use crate::core::errors::{LockNetError, Result};
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, RwLock};
 
@@ -790,5 +791,152 @@ impl SecurityHelper {
     pub async fn invalidate_trust_cache(&self) {
         let mut st = self.state.write().await;
         st.invalidate_trust_graph();
+    }
+
+    // ---- Cross-signing key export / import ----
+
+    /// Export the local cross-signing private keys (MSK, SSK, USK).
+    ///
+    /// This is intended for **self-device** migration: a user who already
+    /// has cross-signing set up on device A exports the keys and imports
+    /// them on device B (through a channel the application trusts: local
+    /// file, encrypted backup, OS keychain, QR-based manual transfer, etc.).
+    ///
+    /// **Security warning:** the returned value contains **private** keys.
+    /// Never transmit it over the network in plaintext. The application is
+    /// responsible for moving it to the new device securely.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidResponse`] if cross-signing is not set up
+    ///   on this device (call [`Self::setup_cross_signing`] first).
+    pub async fn export_cross_signing_keys(&self) -> Result<CrossSigningKeysPrivate> {
+        let keys = self.low.store().cross_signing_keys().await.ok_or_else(|| {
+            LockNetError::InvalidResponse(
+                "cross-signing not set up on this device; call setup_cross_signing first".into(),
+            )
+        })?;
+        Ok((*keys).clone())
+    }
+
+    /// Import cross-signing private keys from another device of the same user.
+    ///
+    /// Verifies that the imported MSK matches the master key the server has
+    /// on file for this user. This prevents accidentally importing keys that
+    /// belong to someone else (or stale keys after a reset on another device).
+    ///
+    /// On success, the keys are persisted to the local store and the WoT
+    /// cache is invalidated.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidArgument`] if the imported MSK does not match
+    ///   the MSK on the server, or if the server has no MSK on file for this
+    ///   user (i.e. cross-signing was reset elsewhere).
+    /// - [`LockNetError::AlreadyConnected`] if this device already has
+    ///   cross-signing keys. Call [`Self::reset_cross_signing`] first, or use
+    ///   a fresh login on a new device.
+    pub async fn import_cross_signing_keys(&self, keys: CrossSigningKeysPrivate) -> Result<()> {
+        if self.low.store().cross_signing_keys().await.is_some() {
+            return Err(LockNetError::AlreadyConnected);
+        }
+
+        let our_uid = self.low.user_id();
+        let query = self
+            .low
+            .crypto()
+            .query_cross_signing_keys(vec![our_uid])
+            .await?;
+        let server_msk = query
+            .get(&our_uid)
+            .map(|u| u.master_key.key.clone())
+            .ok_or_else(|| {
+                LockNetError::InvalidArgument(
+                    "server has no master key for this user — cross-signing may have been reset"
+                        .into(),
+                )
+            })?;
+
+        if keys.msk_pub_b64() != server_msk {
+            return Err(LockNetError::InvalidArgument(format!(
+                "imported MSK does not match server MSK for user {our_uid} \
+                 (server: {server_msk}, imported: {})",
+                keys.msk_pub_b64()
+            )));
+        }
+
+        self.low
+            .store()
+            .cross_signing_keys_put(Arc::new(keys))
+            .await;
+
+        {
+            let mut st = self.state.write().await;
+            st.invalidate_trust_graph();
+        }
+
+        Ok(())
+    }
+
+    /// Sign another session's `ed25519` key with this user's SSK and upload
+    /// the signature.
+    ///
+    /// The target must belong to the **same user** as the caller (a
+    /// self-device). This is the final step of mode-1 QR verification: after
+    /// the QR handshake proves the target device really holds that ed25519
+    /// key, we sign it with our SSK to mark it as a trusted self-device.
+    ///
+    /// # Errors
+    ///
+    /// - [`LockNetError::InvalidResponse`] if this device has no SSK.
+    /// - [`LockNetError::InvalidArgument`] if the target session does not
+    ///   exist, does not belong to the caller's user, or has no `ed25519` key.
+    /// - Server errors propagated from `upload_signatures` (e.g.
+    ///   `unauthorized` if the target belongs to another user).
+    pub async fn sign_device_session(
+        &self,
+        target_user_id: i64,
+        target_session_id: i64,
+    ) -> Result<()> {
+        if target_user_id != self.low.user_id() {
+            return Err(LockNetError::InvalidArgument(
+                "sign_device_session: target must belong to the same user".into(),
+            ));
+        }
+
+        let keys = self
+            .low
+            .store()
+            .cross_signing_keys()
+            .await
+            .ok_or_else(|| {
+                LockNetError::InvalidResponse(
+                    "cross-signing not set up on this device; call setup_cross_signing or import_cross_signing_keys first"
+                        .into(),
+                )
+            })?;
+
+        let sessions = self.low.keys().query(vec![target_user_id]).await?;
+        let target_ed = sessions
+            .get(&target_user_id)
+            .and_then(|m| m.get(&target_session_id))
+            .map(|d| d.ed25519_key.clone())
+            .ok_or_else(|| {
+                LockNetError::InvalidArgument(format!(
+                    "target session {target_session_id} of user {target_user_id} not found in query_keys"
+                ))
+            })?;
+
+        let sig = sign_b64(&keys.ssk, &target_ed)?;
+
+        self.low
+            .crypto()
+            .upload_signatures(Signatures {
+                user_signatures: HashMap::new(),
+                device_signatures: [(target_session_id, sig)].into_iter().collect(),
+            })
+            .await?;
+
+        Ok(())
     }
 }
