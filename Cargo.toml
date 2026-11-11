@@ -1,11 +1,12 @@
 [package]
 name = "locknet-rcab"
-version = "1.0.0-alpha"
+version = "1.0.0-beta"
 edition = "2021"
 rust-version = "1.75"
 description = "LockNet Rust Client-API Binding"
 license = "AGPL-3.0-only"
 repository = "https://github.com/TimeStop34/locknet-rcab"
+readme = "README.md"
 
 [dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "net", "signal"] }
