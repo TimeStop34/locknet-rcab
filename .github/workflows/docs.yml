@@ -5,7 +5,7 @@ on:
     branches: [ "main" ] # или ваша основная ветка
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
