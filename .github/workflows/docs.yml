@@ -29,9 +29,25 @@ jobs:
       - name: Build Documentation
         run: cargo doc --no-deps --all-features
 
-      # Удаляем служебный файл, который иногда мешает загрузке артефакта
       - name: Remove lock file
         run: rm -f ./target/doc/.lock
+
+      - name: Create redirect to crate docs
+        run: |
+          cat <<EOF > ./target/doc/index.html
+          <!DOCTYPE html>
+          <html>
+          <head>
+              <meta charset="utf-8">
+              <title>Redirecting to locknet_rcab</title>
+              <meta http-equiv="refresh" content="0; URL=locknet_rcab/index.html">
+              <link rel="canonical" href="locknet_rcab/index.html">
+          </head>
+          <body>
+              <p>If you are not redirected automatically, follow this <a href="locknet_rcab/index.html">link</a>.</p>
+          </body>
+          </html>
+          EOF
 
       - name: Setup Pages
         uses: actions/configure-pages@v5
