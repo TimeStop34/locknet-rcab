@@ -3,15 +3,12 @@
 pkgs.mkShell {
   nativeBuildInputs = [
     pkgs.pkg-config
-    # pkgs.cargo # Убрано в пользу системного ( в связи с использованием rustup / cargo + rustc / rustoverlay )
-    # pkgs.rustc
   ];
 
   buildInputs = [
     pkgs.openssl
   ];
 
-  # Явно указываем libs из .out, а includes из .dev
   shellHook = ''
     export OPENSSL_LIB_DIR="${pkgs.openssl.out}/lib"
     export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
