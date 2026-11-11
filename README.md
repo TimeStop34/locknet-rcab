@@ -98,7 +98,7 @@ Check out the [`examples/`](./examples) directory for complete runnable programs
 
 ## Docs
 
-The crate is fully documented with rustdoc. To view the generated documentation locally, run:
+The crate is fully documented with [rustdoc](https://timestop34.github.io/locknet-rcab/). To view the generated documentation locally, run:
 
 ```bash
 cargo doc --no-deps --open
