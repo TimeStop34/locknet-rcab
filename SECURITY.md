@@ -6,8 +6,6 @@
 
 Report vulnerabilities privately via [GitHub Security Advisories](https://github.com/TimeStop34/locknet-rcab/security/advisories/new).
 
-*(Для этого включи в репозитории: Settings → Security → Private vulnerability reporting → Enable.)*
-
 Please include:
 
 - A description of the vulnerability and its potential impact.
