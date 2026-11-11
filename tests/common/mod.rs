@@ -65,6 +65,7 @@ pub fn test_config() -> LockNetConfig {
     cfg.sync_on_connect = false;
     cfg.default_history_visibility = locknet_rcab::HistoryVisibility::AllVerifiedSessions;
     cfg.default_megolm_rotation_visibility = locknet_rcab::MegolmRotationVisibility::AllMembers;
+    cfg.accept_invalid_certs = true;
     cfg
 }
 
