@@ -14,6 +14,7 @@ Please include:
 - Any suggested mitigations.
 
 You can expect an initial response within **72 hours**. We ask that you give us reasonable time to address the issue and coordinate disclosure before making it public.
+> If you do not receive a response within 72 hours, please contact **@TimeStop34** directly on Telegram or **@timestop34:xn--e1aracfcfi.xn--p1ai** on Matrix to follow up.
 
 ## Scope
 
@@ -41,6 +42,7 @@ Only the latest stable release (`1.0.x`) receives security fixes. Pre-release ve
 | Version      | Supported          |
 |--------------|--------------------|
 | 1.0.x        | :white_check_mark: |
+| 1.0.0-rc     | :x:                |
 | 1.0.0-beta   | :x:                |
 | 1.0.0-alpha  | :x:                |
 
